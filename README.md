@@ -75,40 +75,41 @@ image ─► ocr.py (local: PIL → Tesseract + OpenCV) ─► text + per-word c
                                        application fields (brand, ABV, …)
 ```
 
-- **`verifier.py`** — framework-free matching + extraction engine. Forgiving on identity fields
+- **`code/verifier.py`** — framework-free matching + extraction engine. Forgiving on identity fields
   (case/punctuation/OCR-slip tolerant), numeric on ABV (handles proof, no 3-digit truncation),
   volume-normalized on net contents (750 mL = 75 cL = 0.75 L), strict on the Government Warning.
   Pure logic, unit-tested.
-- **`ocr.py`** — local OCR. Opens each upload through PIL (decompression-bomb guard + EXIF
+- **`code/ocr.py`** — local OCR. Opens each upload through PIL (decompression-bomb guard + EXIF
   orientation + downscale), then **unions complementary Tesseract passes** (PSM 3 body + PSM 11
   title) so stylized titles aren't dropped, capturing per-word confidence via TSV. A poor or
   low-confidence read escalates to an OpenCV preprocessing tier; the whole chain is time-bounded
   per call so one bad image can't blow the SLA. An optional PaddleOCR deep tier is wired but **off
   by default** (it OOMs a small box) — the bigger-box accuracy upgrade.
-- **`app.py`** — Flask app + the single-file UI. Endpoints: `/verify` (image), `/batch`, and
+- **`code/app.py`** — Flask app + the single-file UI. Endpoints: `/verify` (image), `/batch`, and
   `/verify_text` (browser-extracted text). A global semaphore caps total concurrent Tesseract so
   simultaneous batches can't saturate the box; uploads and the JSON path are size-capped.
 
 ## Repository layout
 
 ```
-app.py            Flask server + the single-page UI (HTML/CSS/JS inline)
-verifier.py       matching + extraction engine (framework-free, unit-tested)
-ocr.py            local OCR ladder (PIL → Tesseract + OpenCV)
-requirements.txt  Python dependencies
-Dockerfile        container image (Tesseract + OpenCV baked in)
-tests/            unit tests for the compliance-critical rules
-examples/         9 synthetic demo labels — the app's "Try an example" set
-sample_images/    19 real-world label photos to test the app with
-gen_and_test.py   dev helper: regenerate the demo labels + run the OCR/verify self-test
-make_samples.py   dev helper: regenerate the three base demo labels
+code/                    the application code
+  app.py                 Flask server + the single-page UI (HTML/CSS/JS inline)
+  verifier.py            matching + extraction engine (framework-free, unit-tested)
+  ocr.py                 local OCR ladder (PIL → Tesseract + OpenCV)
+  gen_and_test.py        dev helper: regenerate the demo labels + run the OCR/verify self-test
+  make_samples.py        dev helper: regenerate the three base demo labels
+tests/                   unit tests for the compliance-critical rules
+examples/                9 synthetic demo labels — the app's "Try an example" set
+sample_images/           19 real-world label photos to test the app with
+requirements.txt         Python dependencies
+Dockerfile               container image (Tesseract + OpenCV baked in)
 ```
 
 ## Tests
 
 ```bash
-python3 -m pytest tests/     # unit tests — the compliance-critical matching rules
-python3 gen_and_test.py      # renders the demo labels + runs them end-to-end through OCR + verify
+python3 -m pytest tests/       # unit tests — the compliance-critical matching rules
+python3 code/gen_and_test.py   # renders the demo labels + runs them end-to-end through OCR + verify
 ```
 
 The unit tests lock in the rules that must not regress: the strict Government Warning (exact wording
@@ -139,7 +140,7 @@ detail), a sticky header, and **CSV export**.
 ```bash
 brew install tesseract            # macOS  (Linux: apt-get install tesseract-ocr)
 pip install -r requirements.txt
-python app.py                     # http://localhost:5050
+python code/app.py                # http://localhost:5050
 python3 -m pytest tests/          # run the unit tests
 ```
 

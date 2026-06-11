@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-OUT = Path(__file__).parent / "examples"
+OUT = Path(__file__).parent.parent / "examples"  # examples/ is at the repo root, above this code/ folder
 OUT.mkdir(exist_ok=True)
 
 WARNING_CAPS = (

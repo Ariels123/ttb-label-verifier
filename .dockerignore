@@ -3,5 +3,5 @@ __pycache__/
 *.pyc
 .git/
 .DS_Store
-make_samples.py
-gen_and_test.py
+code/make_samples.py
+code/gen_and_test.py

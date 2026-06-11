@@ -130,8 +130,9 @@ def health():
     return jsonify({"ok": True})
 
 
-# The built-in synthetic demo labels live in examples/; the "Try an example" links fetch them.
-EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
+# The built-in synthetic demo labels live in examples/ at the REPO ROOT — one level up from
+# this code/ folder (dirname of __file__, then its parent). The "Try an example" links fetch them.
+EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
 
 
 @app.get("/examples/<path:name>")

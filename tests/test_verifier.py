@@ -9,7 +9,9 @@ Run:  python3 -m pytest tests/        (or plain:  python3 tests/test_verifier.py
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# verifier.py lives in the repo's code/ folder (sibling of this tests/ folder), so add
+# <repo-root>/code to the import path before importing it.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "code"))
 import verifier as v  # noqa: E402
 
 WARN = ("GOVERNMENT WARNING: (1) According to the Surgeon General, women should not "

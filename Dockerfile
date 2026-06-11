@@ -13,10 +13,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py verifier.py ocr.py ./
+# The application code lives in code/; examples/ stays at the image root (app.py resolves
+# it as ../examples relative to itself). Dev helpers in code/ are excluded via .dockerignore.
+COPY code/ ./code/
 COPY examples/ ./examples/
 
 # Hugging Face Spaces expects the app on 7860; $PORT lets other hosts override.
+# --chdir code: load app:app from the code/ folder and put it on the import path, so app.py's
+# `import ocr` / `import verifier` resolve. examples/ is then found at ../examples (= /app/examples).
 ENV PORT=7860
 EXPOSE 7860
-CMD ["sh", "-c", "gunicorn -b 0.0.0.0:${PORT:-7860} -w 2 --threads 4 -t 120 app:app"]
+CMD ["sh", "-c", "gunicorn --chdir code -b 0.0.0.0:${PORT:-7860} -w 2 --threads 4 -t 120 app:app"]

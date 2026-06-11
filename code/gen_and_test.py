@@ -13,7 +13,7 @@ sys.path.insert(0, str(HERE))
 import ocr
 import verifier
 
-OUT = HERE / "examples"  # synthetic demo labels live here (also served by the app)
+OUT = HERE.parent / "examples"  # examples/ sits at the repo root, one level above this code/ folder
 OUT.mkdir(exist_ok=True)
 WARN = verifier.GOV_WARNING
 
