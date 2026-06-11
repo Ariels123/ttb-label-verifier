@@ -1,8 +1,41 @@
-"""TTB Label Verifier — web UI (Flask).
+"""TTB Label Verifier — the web layer (Flask).
 
-A thin layer over ocr.py + verifier.py: a single-label screen and a batch screen,
-plus a JSON API. Deliberately simple and high-contrast (the "73-year-old" UX bar),
-fast (local OCR, end-to-end timing shown), and self-contained (no cloud calls).
+WHAT THIS FILE IS
+-----------------
+The front door. A deliberately THIN layer that wires HTTP requests to the two engines —
+ocr.py (image -> text) and verifier.py (text + application fields -> per-field verdict) —
+and serves the entire UI. There is no database and no framework beyond Flask: state lives
+in the request, results are computed and returned, temp files are deleted. Keeping the app
+thin is intentional, so the compliance logic stays in the unit-tested verifier.
+
+THE THREE THINGS IT SERVES
+--------------------------
+  1. The UI — one self-contained HTML page (the `PAGE` string near the bottom: inline
+     CSS + vanilla JS, no build step, no CDN framework). Two screens: Single Label and Batch.
+  2. A JSON API:
+       POST /verify       multipart image + fields -> full per-field result (server OCR)
+       POST /verify_text  JSON of browser-extracted text + fields -> result (ADVISORY; the
+                          image never leaves the user's machine — see the handler's docstring)
+       POST /batch        many images + one optional field template -> list of results
+       GET  /health       liveness probe for the deploy
+       GET  /examples/<f> serves the built-in demo labels for the "Try an example" links
+  3. Static-ish bits: a favicon drawn inline as SVG.
+
+DESIGN BARS (from the brief's stakeholders)
+-------------------------------------------
+  * SIMPLE & HIGH-CONTRAST — Sarah's "my 73-year-old mother could use it": big PASS/FAIL,
+    large type, one screen, status conveyed as text + icon, not color alone.
+  * FAST — local OCR only; end-to-end timing is measured and shown.
+  * SELF-CONTAINED — no cloud calls at runtime (TTB's outbound firewall).
+
+SECURITY POSTURE (this file owns the untrusted-input boundary)
+--------------------------------------------------------------
+Everything crossing the wire is treated as hostile: request size is capped
+(MAX_CONTENT_LENGTH); the /verify_text JSON path is independently length-capped; batch
+size-checks every file BEFORE writing it to disk and enforces a total-bytes budget; temp
+file suffixes come from an extension allow-list, never from the untrusted filename; and a
+global semaphore (`_OCR_SEM`) bounds total concurrent Tesseract across ALL requests so
+OCR — which is CPU-bound — can't oversubscribe the cores and freeze the box.
 
 Run:  python app.py        ->  http://localhost:5050
 """
@@ -47,7 +80,20 @@ def _read(path: str) -> dict:
 
 
 def _verify_upload(fileobj, fields: dict) -> dict:
-    # Handle both file objects from request and raw path/bytes if needed
+    """OCR one uploaded image and verify it against the application `fields`.
+
+    The single-label server path: write the upload to a temp file (suffix from the
+    allow-list, never the raw filename), read it under the concurrency cap, run the
+    verifier, and stamp the result with end-to-end timing, the raw OCR text, and the
+    filename. The temp file is always deleted in `finally`, even on error.
+
+    Args:
+        fileobj: a Werkzeug FileStorage (has .save) — or any object with .read(), so the
+                 same helper is usable from a script/test, not just a request.
+        fields:  the application values to verify against, keyed by FIELD_KEYS.
+    Returns:
+        the verifier result dict, plus total_ms / ocr_text / filename.
+    """
     filename = getattr(fileobj, 'filename', 'image.png')
     suffix = _safe_suffix(filename)
 
@@ -74,24 +120,29 @@ def _verify_upload(fileobj, fields: dict) -> dict:
 
 @app.get("/")
 def index() -> Response:
+    """Serve the single-page UI (the inline `PAGE`)."""
     return Response(PAGE, mimetype="text/html")
 
 
 @app.get("/health")
 def health():
+    """Liveness probe — the deploy/smoke-test hits this to confirm the app is up."""
     return jsonify({"ok": True})
 
 
+# The built-in synthetic demo labels live in examples/; the "Try an example" links fetch them.
 EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
 
 
 @app.get("/examples/<path:name>")
 def example(name):
+    """Serve a built-in demo label by filename (send_from_directory guards against traversal)."""
     return send_from_directory(EXAMPLES_DIR, name)
 
 
 @app.get("/favicon.ico")
 def favicon():
+    """Return the magnifier (🔍) favicon, drawn inline as SVG so there's no static asset."""
     return Response(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
         "<text y='13' font-size='13'>\U0001F50D</text></svg>",
@@ -100,6 +151,7 @@ def favicon():
 
 @app.post("/verify")
 def verify_one():
+    """Single-label server verification: multipart `image` + application fields -> result JSON."""
     f = request.files.get("image")
     if not f:
         return jsonify({"error": "Please choose a label image."}), 400
@@ -150,6 +202,15 @@ def verify_text():
 
 @app.post("/batch")
 def verify_batch():
+    """Batch verification: many `images` + one optional shared field template -> list of results.
+
+    Two passes. PASS 1 (this thread) validates and lands files on disk: each file is
+    size-checked BEFORE it is written (oversize files are recorded as skipped, never stored),
+    and a running total enforces a whole-batch byte budget so a flood of uploads can't fill
+    the disk. PASS 2 OCRs + verifies them on a small thread pool (capped at the core count,
+    because Tesseract is CPU-bound and oversubscription froze the box in testing). Every temp
+    file is removed as its image finishes, and again in a `finally` sweep.
+    """
     files = request.files.getlist("images")
     if not files:
         return jsonify({"error": "Please choose one or more label images."}), 400
@@ -222,6 +283,10 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TTB Label Verifier</title>
 <style>
+/* Styling — high-contrast, large type, generous spacing (the "73-year-old could use it"
+   bar). Palette is defined once as CSS variables in :root and reused everywhere; PASS=green,
+   FAIL=red, caution=amber, but status is ALWAYS also shown as text + icon, never color alone
+   (accessibility / color-blind safety). No external stylesheet — all inline, no build step. */
 :root{--ink:#1a2230;--mut:#5b6573;--line:#d7dde6;--bg:#f4f6f9;--card:#fff;
  --blue:#1a4f8a;--green:#1f8f4e;--greenbg:#e7f6ed;--red:#c0392b;--redbg:#fcebe9;--amber:#b7791f;}
 *{box-sizing:border-box}
@@ -402,10 +467,25 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
 </div>
 </div>
 <script>
+/* =====================================================================================
+   CLIENT-SIDE SCRIPT  (vanilla JS — no framework, no build step)
+   -------------------------------------------------------------------------------------
+   Responsibilities:
+     - drive the two screens (Single Label / Batch)
+     - optionally OCR the image IN THE BROWSER (Tesseract.js) and post only the text, so
+       the image never leaves the user's machine; otherwise upload the image to the server
+     - render the per-field result table (status, expected, detected + confidence)
+   Server endpoints used:  /verify (image)  /verify_text (browser text)  /batch  /examples/<f>
+   The server is always the source of truth; browser OCR is an advisory fast path that
+   automatically falls back to the server if it can't read an image.
+   Sections below are marked with banner comments:  ==== SECTION ====
+   ===================================================================================== */
 const $=id=>document.getElementById(id);
+// App state: the chosen single-label File, the batch File list, and the last batch result
+// (kept so "export CSV" / row expansion can re-read it without re-OCRing).
 let singleFile=null, batchFiles=[], lastBatch=null;
-function show(w){const s=w==='single';$('single').style.display=s?'':'none';$('batch').style.display=s?'none':'';$('tSingle').classList.toggle('on',s);$('tBatch').classList.toggle('on',!s);}
-function esc(x){return (x==null?'':String(x)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function show(w){const s=w==='single';$('single').style.display=s?'':'none';$('batch').style.display=s?'none':'';$('tSingle').classList.toggle('on',s);$('tBatch').classList.toggle('on',!s);}  // toggle screens
+function esc(x){return (x==null?'':String(x)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}  // HTML-escape every value we inject (XSS-safe)
 
 // Capability detection — warn on old/limited browsers, and gracefully disable
 // in-browser OCR when the browser lacks Web Workers (Tesseract.js needs them).
@@ -425,7 +505,10 @@ const CAP={fetch:typeof window.fetch==='function',
         const em=lbl.querySelector('em');if(em)em.textContent='(unavailable in this browser — secure server processing will be used)';}}});
 })();
 
+/* ==== SINGLE LABEL: file selection, examples, preview ============================== */
 const drop=$('drop');
+// Application fields pre-filled by each "Try an example" link, so a click both loads the
+// image AND populates the form, then runs a verification — a one-click end-to-end demo.
 const EXAMPLE_FIELDS={
   'sample_correct.png':{brand_name:'Old Tom Distillery',class_type:'Kentucky Straight Bourbon Whiskey',alcohol_content:'45',net_contents:'750 mL'},
   'sample_bad_abv.png':{brand_name:'Old Tom Distillery',class_type:'Kentucky Straight Bourbon Whiskey',alcohol_content:'45',net_contents:'750 mL'},
@@ -447,8 +530,11 @@ async function loadExample(name){
   }catch(e){$('result').innerHTML='<div class="err">Could not load example: '+esc(e.message)+'</div>';}
 }
 
-// Browser-side OCR (beta): Tesseract.js (WASM) reads the label on the user's own
-// machine; only the extracted TEXT is sent to the server. Lazy-loaded on first use.
+/* ==== BROWSER-SIDE OCR (beta, advisory) ===========================================
+   Tesseract.js (WASM) reads the label on the USER'S OWN machine; only the extracted text
+   is posted to /verify_text — the image never leaves the device. The engine is lazy-loaded
+   from a CDN on first use (so the page itself stays light), and the caller falls back to
+   the secure server if loading or reading fails. */
 let tessReady=false;
 function loadTesseract(){
   return new Promise((resolve,reject)=>{
@@ -502,6 +588,12 @@ async function serverVerifyImage(file){
   return (await fetch('/verify',{method:'POST',body:fd})).json();
 }
 
+/* ==== SINGLE LABEL: verify flow ====================================================
+   Orchestrates one verification: validate the file looks like an image, then either OCR in
+   the browser (and post text to /verify_text) or upload to /verify. If browser OCR yields
+   too few words it throws __LOWREAD__ and we transparently fall back to the server, showing
+   the user a note that the image was uploaded. Always restores the button + scrolls to the
+   verdict at the end. */
 async function verifyOne(){
   if(!singleFile){$('result').innerHTML='<div class="err">Please select a label image first.</div>';return;}
   if(!/^image\//.test(singleFile.type||'')&&!/\.(png|jpe?g|gif|bmp|tiff?|webp|heic)$/i.test(singleFile.name||'')){
@@ -548,7 +640,12 @@ function clearSingle(){
   drop.innerHTML='<div class="dropmain"><div class="big">&#128247;</div><div class="hint">Drag a clear photo of the label here, or</div></div><div class="dropcta">&#128073; Click here to start</div>';
 }
 
-function fmtMs(ms){ms=ms||0;return ms<100?'under 0.1s':(ms/1000).toFixed(1)+'s';}
+/* ==== RENDERING: result banner + per-field table ==================================
+   Pure view code: turn a verifier result object into HTML. Every interpolated value goes
+   through esc(). The big banner states the headline verdict in words + icon (never color
+   alone — the 73-year-old bar), and the table shows one row per field. */
+function fmtMs(ms){ms=ms||0;return ms<100?'under 0.1s':(ms/1000).toFixed(1)+'s';}  // friendly elapsed time
+// A read-confidence pill: High (>=80) / Med (>=60) / Low (<60), or an em-dash when unknown.
 function confPill(c){
   if(c==null)return '<span class="conf na">—</span>';
   const lvl=c>=80?'hi':c>=60?'md':'lo',word=c>=80?'High':c>=60?'Med':'Low';
@@ -567,6 +664,9 @@ function resultsTable(results){
     h+='<tr>'+sc+'<td class="fieldname">'+esc(x.field)+'</td><td>'+esc(x.expected)+'</td><td>'+det+'</td><td class="note">'+esc(x.note)+'</td></tr>';});
   return h+'</tbody></table>';
 }
+// Headline banner, chosen by priority: COULDN'T READ (nothing legible) > FAIL (a real
+// mismatch) > NEEDS A LOOK (something unreadable) > EXTRACTED (no app data was entered) >
+// PASS. This ordering is deliberate so the most serious state always wins the headline.
 function renderResult(d){
   const anyFail=d.results.some(x=>x.status==='fail');
   const anyLow=d.results.some(x=>x.status==='lowconf');
@@ -585,6 +685,10 @@ function renderResult(d){
   return h;
 }
 
+/* ==== BATCH: many labels at once ==================================================
+   Same engines, fanned out. Default is a Government-Warning sweep (one shared optional
+   field template); browser-OCR batch reuses a single Tesseract worker across all images.
+   Results render as a filterable, expandable table with CSV export. */
 $('bfile').addEventListener('change',e=>{batchFiles=[...e.target.files];$('bresult').innerHTML='';$('bcount').innerHTML='<b>'+batchFiles.length+'</b> label'+(batchFiles.length===1?'':'s')+' ready — click to add or change';});
 ['dragover','dragleave','drop'].forEach(ev=>$('bdrop').addEventListener(ev,e=>{e.preventDefault();$('bdrop').classList.toggle('over',ev==='dragover');if(ev==='drop'){batchFiles=[...e.dataTransfer.files];$('bresult').innerHTML='';$('bcount').innerHTML='<b>'+batchFiles.length+'</b> label'+(batchFiles.length===1?'':'s')+' ready — click to add or change';}}));
 

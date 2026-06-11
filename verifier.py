@@ -1,23 +1,67 @@
 """Core label-verification engine for the TTB take-home.
 
-Pure logic — no web or OCR dependencies. Given the expected application fields and
-the text read off a label, it returns a per-field pass/fail with a human reason.
-The matching rules come straight from the stakeholder interviews in the brief:
+WHAT THIS FILE IS
+-----------------
+The compliance brain of the tool. It is PURE LOGIC — no Flask, no Tesseract, no file
+I/O — which is what makes it unit-testable (see tests/test_verifier.py) and reusable
+behind any front end. It takes two inputs:
 
+  1. the application fields a reviewer typed (what the COLA application *claims*), and
+  2. the raw text an OCR engine read off the label image,
+
+and returns a per-field PASS / FAIL / "verify by eye" verdict, each with a plain-English
+reason and a read-confidence number. `verify()` at the bottom is the single entry point;
+everything above it is a helper it composes.
+
+TWO JOBS ON ONE SCREEN (kept deliberately separate)
+---------------------------------------------------
+  * VERIFICATION  — does the label match the application? (the core task)
+  * EXTRACTION    — independently, what does the label itself say for each field?
+    (the "Detected on label" column, produced by `_extract_detected`)
+Expected (application) and Detected (label) are two INDEPENDENT sources. We never check
+the label against itself — that would be circular and meaningless — so extraction is a
+separate, confidence-gated read used only for display, never to decide a PASS.
+
+THE STATUS MODEL
+----------------
+  PASS    — the entered application value matches the label.
+  FAIL    — a genuine, confident MISMATCH (label says 40%, application says 45%), or a
+            mandatory element (the US Government Warning) that is truly absent/altered.
+  SKIP    — the reviewer left this field blank; nothing to verify (never a failure).
+  LOWCONF — the OCR could not read this field, so we say "verify by eye" instead of
+            asserting a FAIL we are not sure of. Crucial distinction: an UNREADABLE field
+            is ambiguous (unreadable vs. truly absent), and a compliance tool must not
+            cry "FAIL" on a bad photo. (Maps to Jenny's "if we can't read it, ask for a
+            better image.") Only a confident contradiction earns a hard FAIL.
+
+DESIGN PRINCIPLES — straight from the stakeholder interviews in the brief
+------------------------------------------------------------------------
   * Brand / class / producer  -> FORGIVING. Dave's "STONE'S THROW" vs "Stone's Throw"
     must pass: case-insensitive, punctuation/whitespace-tolerant, fuzzy for OCR slips.
   * Alcohol content (ABV)      -> NUMERIC. Parse the number and compare with a small
     tolerance, so application "45" matches a label's "45% Alc./Vol. (90 Proof)".
-  * Government Warning         -> STRICT. Jenny's rule: the exact statutory wording,
-    and "GOVERNMENT WARNING:" must be ALL-CAPS. Title-case / altered / missing = fail.
+  * Net contents               -> VOLUME-NORMALIZED. 750 mL, 75 cL and 0.75 L are equal.
+  * Government Warning         -> STRICT. Jenny's rule: the exact statutory wording, and
+    "GOVERNMENT WARNING:" must be ALL-CAPS. Title-case / altered / missing = fail. A
+    NON-US warning (UK "drink responsibly", etc.) is reported distinctly, not as "missing".
+  * Confidence everywhere      -> when given per-word OCR confidence, we expose it per
+    field and let it gate both the LOWCONF state and what extraction dares to display.
 
-Kept framework-free so it's unit-testable and reusable behind any UI.
+Statuses are plain string constants (below) so callers and tests can compare directly.
 """
 from __future__ import annotations
 
 import re
 import time
 
+# Fuzzy string similarity backend.
+# We prefer rapidfuzz: it is fast (C-backed) and tolerant of the character-level noise
+# OCR produces. If it isn't installed we transparently fall back to the standard library's
+# difflib so the engine still runs anywhere — no hard dependency on a native wheel.
+#   _ratio(a, b)   -> full-string similarity in 0..1 (whole strings must be alike)
+#   _partial(a, b) -> best-substring similarity in 0..1 (a short needle inside a long
+#                     haystack scores high — the right tool for "is the brand somewhere
+#                     in this page of label text?")
 try:  # rapidfuzz is fast + handles OCR noise well; fall back to stdlib if absent.
     from rapidfuzz import fuzz
 
@@ -26,8 +70,8 @@ try:  # rapidfuzz is fast + handles OCR noise well; fall back to stdlib if absen
 
     def _partial(a: str, b: str) -> float:
         return fuzz.partial_ratio(a, b) / 100.0
-except Exception:  # pragma: no cover
-    from difflib import SequenceMatcher
+except Exception:  # pragma: no cover  (difflib is slower and has no partial_ratio, so we
+    from difflib import SequenceMatcher          # approximate partial with full ratio)
 
     def _ratio(a: str, b: str) -> float:
         return SequenceMatcher(None, a, b).ratio()
@@ -35,7 +79,9 @@ except Exception:  # pragma: no cover
     def _partial(a: str, b: str) -> float:
         return SequenceMatcher(None, a, b).ratio()
 
-# 27 CFR 16.21 — the exact mandated health warning statement.
+# 27 CFR 16.21 — the EXACT mandated health-warning statement, verbatim. This is the
+# single source of truth the strict warning check (`check_warning`) matches against; the
+# sample-label generators import it too, so test labels and the checker never drift apart.
 GOV_WARNING = (
     "GOVERNMENT WARNING: (1) According to the Surgeon General, women should not "
     "drink alcoholic beverages during pregnancy because of the risk of birth defects. "
@@ -43,109 +89,201 @@ GOV_WARNING = (
     "operate machinery, and may cause health problems."
 )
 
+# Per-field verdict constants. Plain strings (not an enum) so callers, JSON, and unit
+# tests can compare against them directly without importing a type. See "THE STATUS
+# MODEL" in the module docstring for the meaning of each.
 PASS, FAIL, SKIP, LOWCONF = "pass", "fail", "skip", "lowconf"
 
 
 def _loose(s: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace — for forgiving comparison.
-    Also normalizes common OCR slips (0/O, 1/I/l)."""
+    """Canonicalize a string for FORGIVING comparison — the heart of "STONE'S THROW"
+    matching "Stone's Throw".
+
+    Pipeline: lowercase → fold the OCR look-alikes that Tesseract most often confuses
+    (0↔O, 1↔I↔l) onto a single canonical letter → drop every non-alphanumeric character →
+    collapse runs of whitespace to single spaces → trim. Two strings that differ only in
+    case, punctuation, spacing, or those specific OCR slips become byte-identical, so a
+    plain substring test (`in`) suffices for the common case.
+
+    Args:    s: any string (None is treated as "").
+    Returns: the normalized form, e.g. "Stone's Throw!" -> "stones throw".
+    """
     s = (s or "").lower()
     s = s.replace("0", "o").replace("1", "i").replace("l", "i")
     return re.sub(r"[^a-z0-9 ]", "", re.sub(r"\s+", " ", s)).strip()
 
 
 def check_text(expected: str, ocr: str, threshold: float = 0.85) -> tuple[str, str, str | None]:
-    """Forgiving presence check for a short field (brand, class, producer, net contents)."""
+    """Forgiving PRESENCE check for a short identity field (brand, class, producer).
+
+    "Present" rather than "equal": we ask whether the expected value appears ANYWHERE in
+    the label's text, because the application value is one phrase while the OCR text is the
+    whole label. Two-step: first an exact substring test on the `_loose`-normalized strings
+    (fast, handles case/punctuation/OCR-slips); if that misses, a fuzzy `_partial` ratio
+    catches residual OCR noise, passing when it clears `threshold` (default 0.85).
+
+    Args:
+        expected:  the application value (blank -> SKIP, nothing to verify).
+        ocr:       the full text read off the label.
+        threshold: minimum fuzzy similarity (0..1) to accept when the exact test misses.
+    Returns:
+        (status, human_reason, detected) — a 3-tuple shared by every checker. `detected`
+        echoes the expected value on a PASS (it was confirmed present) and is None on FAIL.
+    """
     e = _loose(expected)
     if not e:
         return SKIP, "no expected value provided", None
     t = _loose(ocr)
-    if e in t:
+    if e in t:                                       # exact (post-normalization) substring hit
         return PASS, f"“{expected}” found on the label", expected
-    score = _partial(e, t)
+    score = _partial(e, t)                           # fall back to fuzzy: absorb OCR noise
     if score >= threshold:
         return PASS, f"matched (≈{int(score * 100)}%)", expected
     return FAIL, f"“{expected}” not found on the label (best {int(score * 100)}%)", None
 
 
 def _normalize_numbers(s: str) -> str:
-    """Normalize OCR noise in numbers like '1 2 . 5 %' -> '12.5%'"""
+    """Repair OCR's two classic number-mangling habits before we parse digits.
+
+    OCR frequently sprays spaces through numbers ("1 2 . 5 %") because it segments glyphs
+    individually. Left alone, a regex would read "12.5%" as a "1" and a "2". We (1) delete
+    spaces sitting between two digits and (2) tidy spaces around a decimal point/comma, so
+    "1 2 . 5 %" becomes "12.5%". Everything else is left untouched.
+
+    Args:    s: raw OCR text (None -> "").
+    Returns: the same text with intra-number spacing repaired.
+    """
     s = s or ""
-    # Remove space between digits
-    s = re.sub(r"(\d)\s+(?=\d)", r"\1", s)
-    # Remove space around decimal point/comma
-    s = re.sub(r"(\d)\s*[\.,]\s*(\d)", r"\1.\2", s)
+    s = re.sub(r"(\d)\s+(?=\d)", r"\1", s)            # join digits split by spaces: "4 5" -> "45"
+    s = re.sub(r"(\d)\s*[\.,]\s*(\d)", r"\1.\2", s)   # tidy the decimal: "12 . 5" -> "12.5"
     return s
 
 
 def _abv(s: str):
-    """Extract a numeric ABV. Prefer an explicit percentage (e.g. '45%' or '45 Alc/Vol')
-    over a proof reading, so 'application' wording like '45% Alc./Vol. (90 Proof)' resolves
-    to 45 — not 22.5. Falls back to proof/2 only when no percentage is present."""
+    """Parse ONE alcohol-by-volume number out of a string, resolving the %-vs-proof ambiguity.
+
+    A spirit label commonly prints both forms — "45% Alc./Vol. (90 Proof)" — and proof is
+    exactly twice the percentage. If we naively grabbed the first number we might return 90,
+    or halve it to 45 by luck; if we grabbed proof we'd return 22.5 for a 45% spirit. So the
+    rule is explicit and deterministic:
+
+        1. An explicit PERCENTAGE / alc / abv / vol number wins (this is the real ABV).
+        2. Only if there is NO percentage do we read "proof" and divide by two.
+        3. Failing both, take any bare number as a last resort.
+
+    The `\\d{1,3}` (not `\\d{1,2}`) matters: it lets "100" and "151" (overproof rum) parse
+    whole instead of truncating to "10"/"15".
+
+    Args:    s: a string that may contain an ABV (the application value, or a label snippet).
+    Returns: the ABV as a float, or None if no number is present.
+    """
     s = _normalize_numbers((s or "").lower())
-    # Explicit percentage or alc/vol number wins (3 digits so 100 isn't truncated to 10).
+    # (1) Explicit percentage / alc-vol number wins — this is the true ABV.
     m = re.search(r"(\d{1,3}(?:\.\d+)?)\s*(?:%|alc|abv|vol)", s)
     if m:
         return float(m.group(1))
+    # (2) No percentage anywhere -> a proof reading, converted to ABV (proof / 2).
     if "proof" in s:
         m = re.search(r"(\d{1,3}(?:\.\d+)?)\s*proof", s) or re.search(r"(\d{1,3}(?:\.\d+)?)", s)
         if m:
             return float(m.group(1)) / 2.0
+    # (3) Last resort: any bare number.
     m = re.search(r"(\d{1,3}(?:\.\d+)?)", s)
     return float(m.group(1)) if m else None
 
 
 def check_abv(expected: str, ocr: str, tol: float = 0.1) -> tuple[str, str, str | None]:
-    """Numeric ABV check: find the percentage(s) on the label, compare to expected."""
+    """Numeric ABV check: collect every alcohol figure on the label and see if one equals
+    the application's claimed value (within a small tolerance).
+
+    Why collect ALL candidates instead of one: a label can show the percentage and the proof
+    and sometimes a serving figure, in any order. We gather each as a (value, raw_text) pair —
+    percentages as-is, proof halved, alc/abv numbers as-is — then PASS if any candidate lands
+    within `tol` of the expected ABV. If none match, the reason lists what we did see, which
+    is far more useful to a reviewer than a bare "mismatch".
+
+    Args:
+        expected: the application's alcohol content (e.g. "45", "45%", "90 proof").
+        ocr:      the full label text.
+        tol:      absolute ABV tolerance in percentage points (default 0.1) — absorbs
+                  rounding and OCR jitter without letting 40% pass for 45%.
+    Returns:
+        (status, human_reason, detected). On PASS, `detected` is the exact label substring
+        that matched; on FAIL, the first alcohol figure seen (or None if the label had none).
+    """
     e = _abv(expected)
     if e is None:
         return SKIP, "no expected alcohol content", None
-    
-    # Pre-clean OCR text for better number extraction
+
+    # Repair split digits once, up front, so all three patterns below see clean numbers.
     clean_ocr = _normalize_numbers(ocr or "")
-    
-    cands = []
-    # Explicit %
+
+    cands = []  # [(abv_value, raw_label_text), ...] — every alcohol figure found on the label
+    # Explicit percentages: "45%", "13.5 %".
     for m in re.finditer(r"(\d{1,3}(?:\.\d+)?)\s*%", clean_ocr):
         cands.append((float(m.group(1)), m.group(0)))
-    # Proof
+    # Proof readings, converted to ABV (proof / 2): "90 Proof" -> 45.
     for m in re.finditer(r"(\d{1,3}(?:\.\d+)?)\s*proof", clean_ocr.lower()):
         cands.append((float(m.group(1))/2.0, m.group(0)))
-    # General alc/abv numbers
+    # Numbers explicitly tagged alc/abv but without a "%" sign.
     for m in re.finditer(r"(\d{1,3}(?:\.\d+)?)\s*(?:alc|abv)", clean_ocr.lower()):
         cands.append((float(m.group(1)), m.group(0)))
 
     for val, raw in cands:
         if abs(val - e) <= tol:
             return PASS, f"{e:g}% alcohol matches the label", raw
-    
+
+    # No candidate matched — report what the label actually showed, for the reviewer.
     seen = ", ".join(f"{c:g}%" for c in sorted(set(v for v, r in cands))) or "none"
     detected = cands[0][1] if cands else None
     return FAIL, f"label shows {seen}; application says {e:g}%", detected
 
 
 def check_warning(ocr: str) -> tuple[str, str]:
-    """Strict Government Warning check: exact statutory wording + ALL-CAPS heading."""
+    """Strict Government Warning check — the one element the brief says must be exact.
+
+    This is intentionally the LEAST forgiving check in the file (Jenny's rule). It clears
+    three independent hurdles, each of which can fail the label on its own:
+
+      1. ALL-CAPS HEADING. The literal "GOVERNMENT WARNING:" must appear in upper case. We
+         first collapse whitespace so an OCR line-wrap ("GOVERNMENT\\nWARNING:") still counts,
+         then test case-sensitively. If the words are present but not all-caps (a title-case
+         "Government Warning:"), that is a specific, reportable defect — not "missing".
+      2. EXACT STATUTORY WORDING. A fuzzy `_partial` ratio against the canonical 27 CFR 16.21
+         text must clear a HIGH bar (0.95). High rather than 1.0 only to tolerate OCR noise —
+         not to forgive real edits.
+      3. CRITICAL TERMS PRESENT. A belt-and-suspenders keyword sweep. Fuzzy matching could in
+         principle accept text whose MEANING was altered (e.g. a dropped clause) if enough
+         surrounding words match; requiring each load-bearing phrase to be literally present
+         ("surgeon general", "birth defects", "operate machinery", …) blocks that.
+
+    Why so strict: the health warning is statutorily mandated word-for-word, so "close enough"
+    is the wrong default here even though it is the right default for a brand name.
+
+    Args:    ocr: the full label text.
+    Returns: (status, human_reason). Only PASS or FAIL — no SKIP (the warning is never
+             optional) and no LOWCONF here (the confidence-aware "verify by eye" downgrade is
+             applied by `verify()`, which knows the read's mean confidence).
+    """
     raw = ocr or ""
     flat_caps = re.sub(r"\s+", " ", raw)  # collapse OCR line-wraps so "GOVERNMENT\nWARNING:" still matches
 
-    # Requirement: "GOVERNMENT WARNING:" present and ALL-CAPS. (Per 27 CFR the heading is the
-    # all-caps part; the body wording must match but need not be uppercase.)
+    # Hurdle 1 — the ALL-CAPS heading. (Per 27 CFR the heading is the all-caps part; the body
+    # wording must match but need not itself be uppercase.)
     if "GOVERNMENT WARNING:" not in flat_caps:
         if "government warning" in flat_caps.lower():
             return FAIL, "Present, but “GOVERNMENT WARNING:” is not in ALL-CAPS"
         return FAIL, "Government Warning header is missing"
 
-    # Requirement: Exact statutory wording
-    # We use a high threshold but also verify "Critical Keywords" that must be present.
+    # Hurdle 2 — exact statutory wording, fuzzy only enough to survive OCR noise (0.95 bar).
     body_match = _partial(_loose(GOV_WARNING), _loose(raw))
-    if body_match < 0.95: # Tightened from 0.92
+    if body_match < 0.95:
         return FAIL, f"Statutory wording is incorrect or incomplete ({int(body_match * 100)}%)"
-    
-    # Critical keyword check to prevent a "forgiving" match on altered meaning.
-    # Normalize whitespace first: OCR wraps the warning across lines, so a phrase
-    # like "operate machinery" reads as "operate\nmachinery" — collapse runs of
-    # whitespace to single spaces before the substring test, or valid labels fail.
+
+    # Hurdle 3 — every load-bearing phrase must literally appear, so a high fuzzy score can't
+    # paper over altered meaning. Collapse whitespace first: OCR wraps the warning across
+    # lines, so "operate machinery" can read as "operate\nmachinery" — without this flattening
+    # a perfectly valid label would fail the substring test.
     flat = re.sub(r"\s+", " ", raw).lower()
     criticals = ["SURGEON GENERAL", "SHOULD NOT DRINK", "PREGNANCY", "BIRTH DEFECTS",
                  "OPERATE MACHINERY", "DRIVE A CAR", "HEALTH PROBLEMS"]
@@ -156,18 +294,28 @@ def check_warning(ocr: str) -> tuple[str, str]:
     return PASS, "Present, exact statutory wording, ALL-CAPS heading"
 
 
+# Net-contents unit handling.
+# _UNIT maps the many ways a label can spell a unit ("milliliters", "litre", "ozs", …) onto
+# a small set of canonical keys. _QTY_RE pulls "<number> <unit>" pairs out of label text
+# (note "fl.? oz" allows "fl oz" / "fl. oz" / "floz"). _TO_ML then converts a canonical unit
+# to milliliters — the common denominator — so that 750 mL, 75 cL and 0.75 L all reduce to
+# the same 750.0 and compare equal regardless of how a given label chose to print the volume
+# (imports often use cL; some spirits show fl oz).
 _UNIT = {"ml": "ml", "milliliter": "ml", "milliliters": "ml", "l": "l", "liter": "l",
          "litre": "l", "liters": "l", "litres": "l", "cl": "cl", "floz": "floz", "oz": "floz", "ozs": "floz"}
 _QTY_RE = r"(\d+(?:\.\d+)?)\s*(ml|milliliters?|liters?|litres?|l|cl|fl\.?\s*oz|ozs?)\b"
-
-
-# Convert each unit to milliliters so equal volumes compare equal regardless of how the
-# label writes them (imports often use cL; spirits sometimes show fl oz).
 _TO_ML = {"ml": 1.0, "cl": 10.0, "l": 1000.0, "floz": 29.5735}
 
 
 def _qty_ml(s):
-    """Parse a net-contents quantity to milliliters: 750 mL == 75 cL == 0.75 L."""
+    """Parse the first "<number> <unit>" quantity in a string into milliliters.
+
+    Collapses the unit's spelling to a canonical key via `_UNIT`, then scales by `_TO_ML`,
+    so 750 mL, 75 cL and 0.75 L all return 750.0.
+
+    Args:    s: a string that may contain a volume (None -> None).
+    Returns: the volume in mL as a float, or None if no recognizable quantity is found.
+    """
     m = re.search(_QTY_RE, (s or "").lower())
     if not m:
         return None
@@ -176,26 +324,40 @@ def _qty_ml(s):
 
 
 def check_quantity(expected, ocr) -> tuple[str, str, str | None]:
-    """Net-contents by VOLUME (normalized to mL): 750 mL matches a label's 75 cL or
-    0.75 L, but NOT 1750 mL. 1% tolerance absorbs rounding/OCR slips."""
+    """Net-contents check by VOLUME rather than by string, so unit differences don't matter.
+
+    Both sides are reduced to milliliters and compared with a 1% tolerance (floored at 1 mL):
+    an application "750 mL" matches a label printed as "75 cL" or "0.75 L", but NOT "1750 mL".
+    If the expected value isn't a parseable volume (some net-contents fields are free text,
+    e.g. "1 PINT 9 FL OZ"), we gracefully fall back to the forgiving `check_text` path.
+
+    Args:
+        expected: the application's net contents.
+        ocr:      the full label text.
+    Returns:
+        (status, human_reason, detected). On PASS, `detected` is the matching label substring;
+        on FAIL, the first quantity seen on the label (or None).
+    """
     exp = _qty_ml(expected)
     if exp is None:
-        return check_text(expected, ocr)
-    tol = max(1.0, exp * 0.01)
-    
+        return check_text(expected, ocr)          # expected isn't a volume -> forgiving text match
+    tol = max(1.0, exp * 0.01)                     # 1% tolerance, but never tighter than 1 mL
+
     first_detected = None
     for m in re.finditer(_QTY_RE, (ocr or "").lower()):
         unit = _UNIT.get(re.sub(r"[^a-z]", "", m.group(2)), "")
         if unit in _TO_ML:
             val_ml = float(m.group(1)) * _TO_ML[unit]
             if first_detected is None:
-                first_detected = m.group(0)
+                first_detected = m.group(0)        # remember the first quantity, for the FAIL note
             if abs(val_ml - exp) <= tol:
                 return PASS, f"{expected} found on the label", m.group(0)
     return FAIL, f"net contents {expected} not found on the label", first_detected
 
 
-# (application key, display label, checker)
+# The field registry that drives `verify()`: one row per checkable field, as
+# (application_key, human_display_label, checker_function). Order here is the order results
+# appear in the UI. To add a field you add a row — the engine loops over this table.
 FIELDS = [
     ("brand_name", "Brand name", check_text),
     ("class_type", "Class / type", check_text),
@@ -206,22 +368,41 @@ FIELDS = [
 ]
 
 
-LOW_CONF = 60   # below this median word-confidence, an UN-FOUND field is "couldn't read", not "failed"
+# Median word-confidence threshold. At or below this, a field we could NOT find on the label
+# is treated as "couldn't read" (LOWCONF / verify by eye) rather than a hard FAIL — because on
+# a poor read, absence is ambiguous. Above it, a genuinely missing value can be trusted as a
+# real mismatch.
+LOW_CONF = 60
 # Markers that say "this is a non-US-market label" — so a missing US warning is a real
-# compliance gap, not an OCR miss. (Italian/French/German + UK-specific phrases.)
+# compliance gap, not an OCR miss. (Italian/French/German + UK-specific phrases.) Currently
+# kept for reference/future use; the live foreign-warning decision in verify() uses a more
+# targeted phrase set tuned to the warning sentence itself.
 _FOREIGN = re.compile(r"chief medical|consommation|contiene|prodotto|produkt|sulfit[ie]|drinkaware|verbraucher", re.I)
 
 
 def _words_conf(value, words):
-    """Confidence of the OCR words that spell out `value` (a matched field), or None if
-    those words can't be located. Sliding window over the (word, conf) list."""
+    """Find the OCR confidence of the specific words that spell out `value`.
+
+    Used to attach a read-confidence to the value we DETECTED for a field (rather than the
+    whole-label median). We strip both `value` and each OCR token down to bare alphanumerics,
+    then slide an up-to-8-token window across the word list, concatenating as we go, until the
+    normalized value appears inside the concatenation — and return the mean confidence of the
+    tokens that formed it.
+
+    Args:
+        value: the detected/matched string whose source words we want to score.
+        words: the OCR word list as [(text, confidence_0_100), ...].
+    Returns:
+        mean confidence (0..100) of the words spelling `value`, or None if they can't be
+        located (or there are no words — the text-only unit-test path).
+    """
     e = re.sub(r"[^a-z0-9]", "", (value or "").lower())
     if not e or not words:
         return None
     toks = [(re.sub(r"[^a-z0-9]", "", w.lower()), c) for w, c in words]
     for i in range(len(toks)):
         acc, cs = "", []
-        for j in range(i, min(i + 8, len(toks))):
+        for j in range(i, min(i + 8, len(toks))):     # window of up to 8 tokens (multi-word values)
             acc += toks[j][0]; cs.append(toks[j][1])
             if e in acc:
                 return sum(cs) / len(cs)
@@ -229,20 +410,35 @@ def _words_conf(value, words):
 
 
 def _absent(key, expected, ocr):
-    """Was the field's subject not located on the label at all (vs. found-but-mismatched)?
-    Only an ABSENT field on a LOW-confidence read becomes 'couldn't read'."""
+    """Distinguish "the label never mentions this" from "found it, but it's wrong".
+
+    This is what lets `verify()` downgrade an unreadable field to LOWCONF instead of FAIL: a
+    FAIL only deserves to stand if the subject was actually PRESENT and contradicted the
+    application. For the structured fields we look for the SHAPE of a value (any ABV-like
+    number, any quantity, the warning header); for free-text fields we ask whether even a
+    loose fuzzy trace of the expected value exists (< 0.55 similarity == effectively absent).
+
+    Args:
+        key:      the field's application key (selects the absence test).
+        expected: the application value (used only for the free-text fuzzy test).
+        ocr:      the full label text.
+    Returns:
+        True if the field's subject appears to be missing from the label entirely.
+    """
     low = (ocr or "").lower()
     if key == "alcohol_content":
-        return not re.search(r"\d{1,3}(?:\.\d+)?\s*(?:%|proof|alc|abv|vol)", low)
+        return not re.search(r"\d{1,3}(?:\.\d+)?\s*(?:%|proof|alc|abv|vol)", low)   # no ABV-shaped number
     if key == "net_contents":
-        return not re.search(_QTY_RE, low)
+        return not re.search(_QTY_RE, low)                                          # no quantity at all
     if key == "__warning__":
         return "government warning" not in low
-    return _partial(_loose(expected), _loose(ocr)) < 0.55
+    return _partial(_loose(expected), _loose(ocr)) < 0.55                           # no fuzzy trace -> absent
 
 
-# Class/type lexicon — LONGEST specific phrases first so "kentucky straight bourbon whiskey"
-# wins over "whiskey" and "cabernet sauvignon" over "wine". (Codex: a real lexicon, not 3 words.)
+# Class/type lexicon used by extraction to recognize the beverage type on a label.
+# Ordered LONGEST / most-specific phrase FIRST and scanned in order, so the most precise
+# match wins: "kentucky straight bourbon whiskey" beats the bare "whiskey", and "cabernet
+# sauvignon" beats "wine". Without this ordering a generic word would shadow the specific one.
 _CLASS_LEXICON = [
     "kentucky straight bourbon whiskey", "single malt scotch whisky", "blended scotch whisky",
     "straight bourbon whiskey", "straight rye whiskey", "tennessee whiskey", "irish whiskey",
@@ -255,7 +451,10 @@ _CLASS_LEXICON = [
 ]
 
 
-# A brand line must NOT be a warning, regulatory, award, or field-value line.
+# Brand-name extraction picks a prominent top line — but the most prominent lines are often
+# NOT the brand. This pattern rejects any candidate line that is really a warning, regulatory
+# notice, appellation, award, allergen, process statement, or a field value (ABV / proof /
+# volume). If a line matches this, it is skipped as a brand candidate.
 _NOT_BRAND = re.compile(
     r"government|warning|smoking|alcohol abuse|consumption|injurious|responsibly|chief medical|"
     r"surgeon|dangerous|health|denominaz|indicazione|controllat|garantit|award|medall|contains|"
@@ -264,11 +463,33 @@ _NOT_BRAND = re.compile(
 
 
 def _extract_detected(key, ocr_text, words=None, mean_conf=None):
-    """Best-effort read of what the LABEL says for a field, for the 'Detected' column.
+    """Best-effort read of what the LABEL itself says for one field — the "Detected" column.
 
-    GATED BY READ CONFIDENCE + PLAUSIBILITY so we surface real values on legible labels and
-    stay SILENT (rather than show OCR garbage) on hard ones — showing a confidently-wrong
-    brand is worse than showing nothing. Conservative: leaves a field blank when unsure."""
+    This powers EXTRACTION (independent of verification). Its guiding principle is
+    "silence beats a confident wrong answer": on a hard or low-confidence read it returns
+    None and the UI simply shows nothing, which is far better for a compliance tool than
+    displaying OCR garbage that looks authoritative.
+
+    Two gates keep it honest:
+      * READ CONFIDENCE — below 40 we extract nothing at all; numbers (ABV, net contents)
+        are allowed down to 40, but free-text fields (brand, class, producer, origin) need
+        60+, since a wrong word is more misleading than a wrong-looking number.
+      * PLAUSIBILITY — values must fall in sane ranges (ABV 4–70%, bottle 50–2000 mL) so a
+        "100%" that is really grape content, or a "70 L" misread, is ignored.
+
+    Per-key strategy: numbers via tolerant regex; origin/producer ONLY when anchored by a
+    cue word ("Product of", "Bottled by") and read line-by-line so we never bleed into the
+    next line; class via the longest-phrase lexicon with word boundaries; brand as the first
+    prominent top line that survives the `_NOT_BRAND` filter and looks like a real word.
+
+    Args:
+        key:       the field's application key (selects the strategy).
+        ocr_text:  the full label text.
+        words:     optional [(text, conf)] (unused here, accepted for signature symmetry).
+        mean_conf: median read confidence (0..100); the confidence gate. None == treat as 100.
+    Returns:
+        the detected string for display, or None when unsure / gated out.
+    """
     low = (ocr_text or "").lower()
     lines = [l.strip() for l in (ocr_text or "").splitlines() if l.strip()]
     mc = mean_conf if mean_conf is not None else 100

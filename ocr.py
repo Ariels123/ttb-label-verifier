@@ -1,14 +1,45 @@
-"""Local OCR for label images — Tesseract binary via subprocess.
+"""Local OCR for label images — the only part of the system that touches an image.
 
-Why shell out instead of pytesseract: the binary needs no Python ML stack (no
-pandas/NumPy), so it stays fast, dependency-light, and trivial to install in a
-container (apt-get install tesseract-ocr). Everything runs ON THE BOX — no cloud
-vision API — which is the whole point given TTB's outbound-firewall constraint
-and the 5-second SLA.
+WHAT THIS FILE IS
+-----------------
+It turns a label image (a file path) into text + per-word confidence for verifier.py to
+check. `read_label()` is the entry point; everything else is a rung on its escalation
+ladder. It is the system's sole image dependency: app.py and verifier.py never see pixels.
 
-Hard labels escalate through a ladder: best-of-PSM Tesseract first, then OpenCV-
-preprocessed variants (CLAHE / adaptive threshold / Otsu / deskew), then an optional
-heavier model — so clean labels stay fast and only difficult ones pay the extra cost.
+WHY TESSERACT VIA SUBPROCESS (not pytesseract / a cloud API)
+------------------------------------------------------------
+We shell out to the `tesseract` binary instead of importing pytesseract because the binary
+needs no Python ML stack (no pandas/NumPy just to read a label), so it stays fast,
+dependency-light, and trivial to install in a container (`apt-get install tesseract-ocr`).
+And everything runs ON THE BOX — there is NO cloud vision API call anywhere — which is the
+whole point: TTB's network blocks outbound ML endpoints, and the tool must clear a ~5-second
+SLA. Local OCR satisfies both.
+
+THE ESCALATION LADDER (cheap first; only hard images pay more)
+--------------------------------------------------------------
+A clean label should be fast; only difficult ones should incur extra work. So `read_label`
+climbs a ladder and stops as soon as the read is "useful enough":
+
+  Tier 1  Tesseract PSM 3 (full-page, with TSV per-word confidence) UNION PSM 11 (sparse,
+          for big stylized title text). The union is key — different page-segmentation modes
+          catch different regions, and merging them recovers a brand title PSM 3 alone drops.
+  Tier 2  If the read is poor OR low-confidence: OpenCV preprocessing variants (CLAHE
+          contrast, adaptive threshold, Otsu, deskew) re-OCR'd at PSM 6/11. Cheap CPU ops
+          that rescue glary / low-contrast / slightly rotated photos.
+  Tier 3  A heavier deep-learning model (PaddleOCR) for ornate labels the first two tiers
+          still can't read. OFF BY DEFAULT — it OOMs a small 2 GB box — and degrades
+          gracefully when absent. The documented accuracy upgrade for a bigger box.
+
+SPEED & SAFETY INVARIANTS
+-------------------------
+  * TIME-BOUNDED. A total wall-clock budget plus a per-call cap (`rem()`) means one
+    pathological image can never blow the SLA; the ladder simply stops climbing.
+  * BOMB-GUARDED. Every upload is opened through PIL first (`_working_image`), which enforces
+    a decompression-bomb pixel cap, applies EXIF rotation, and downscales huge photos before
+    any subprocess sees them.
+  * CONFIDENCE-CARRYING. Tier 1 uses Tesseract's TSV output to capture each word's confidence;
+    the median of those drives both the escalation decision here and the "can we trust this
+    field" display downstream in verifier.py.
 """
 from __future__ import annotations
 
@@ -46,10 +77,21 @@ TESSERACT = shutil.which("tesseract") or "tesseract"
 
 
 def _run(path: str, timeout: int, psm: int = 3) -> str:
-    """Run Tesseract on a file path; return decoded stdout (best-effort)."""
+    """Run Tesseract on an image file and return its plain-text stdout.
+
+    Best-effort: any failure (binary missing, timeout, decode error) returns "" so the
+    caller's ladder can simply move on rather than crash.
+
+    Args:
+        path:    image file to OCR.
+        timeout: seconds before the subprocess is killed (keeps the SLA honest).
+        psm:     Tesseract Page Segmentation Mode — how it assumes the text is laid out.
+                 3 = fully automatic (default), 6 = a single uniform block, 11 = sparse
+                 text (good for scattered/stylized title words).
+    Returns:
+        decoded UTF-8 text, or "" on any error.
+    """
     try:
-        # --psm 3: fully automatic segmentation.
-        # --psm 6: assume a single uniform block of text.
         proc = subprocess.run(
             [TESSERACT, path, "stdout", "--psm", str(psm)],
             capture_output=True, timeout=timeout,
@@ -60,16 +102,35 @@ def _run(path: str, timeout: int, psm: int = 3) -> str:
 
 
 def _score(text: str) -> int:
-    """Quality proxy: count of word-like tokens (3+ letters). Distinguishes real
-    text from OCR garbage far better than raw character count (garbage has lots of
-    characters but few real words)."""
+    """Cheap read-quality proxy: how many word-like tokens (3+ letters) the text contains.
+
+    Used throughout the ladder to compare reads and decide "is this good enough or do we
+    escalate?". Counting real words beats counting characters because OCR garbage tends to be
+    character-rich but word-poor (e.g. "|!.~ 4a" has length but no words).
+
+    Args:    text: an OCR read (None -> 0).
+    Returns: the number of 3+-letter alphabetic tokens.
+    """
     return len(re.findall(r"[A-Za-z]{3,}", text or ""))
 
 
 def _run_tsv(path: str, timeout, psm: int = 3):
-    """Like _run but with Tesseract's TSV output, so we get PER-WORD confidence.
-    Returns (reconstructed_text, [(word, conf 0-100), ...]). Confidence drives the
-    read-quality signal and the per-field 'can we trust this read' display."""
+    """Like `_run`, but request Tesseract's TSV format so we get PER-WORD CONFIDENCE.
+
+    TSV is a tab-separated table with one row per detected token plus geometry/grouping
+    columns. We skip the header, ignore empty tokens, and use the block/paragraph/line
+    columns (2,3,4) to re-assemble the text line by line while harvesting each token's
+    confidence (column 10) and text (column 11). This per-word confidence is what makes the
+    whole "can we trust this field / should we escalate" mechanism possible.
+
+    Args:
+        path:    image file to OCR.
+        timeout: subprocess timeout in seconds.
+        psm:     Page Segmentation Mode (see `_run`).
+    Returns:
+        (reconstructed_text, words) where words is [(token, confidence_0_100), ...]. On any
+        error, ("", []).
+    """
     try:
         proc = subprocess.run(
             [TESSERACT, path, "stdout", "--psm", str(psm), "tsv"],
@@ -100,8 +161,16 @@ def _run_tsv(path: str, timeout, psm: int = 3):
 
 
 def _mean_conf(words) -> float:
-    """Median confidence over real (multi-letter) words — robust to a few junk tokens.
-    0 when nothing legible was read."""
+    """The read's overall confidence: the MEDIAN word confidence (despite the name).
+
+    Median, not mean, because OCR confidence is noisy — a handful of junk tokens at confidence
+    0 or 100 would drag an average around, whereas the median reflects the typical word. We
+    also restrict to real (2+-letter) tokens so stray punctuation doesn't count. This single
+    number gates escalation in `read_label` and becomes the per-field trust signal downstream.
+
+    Args:    words: [(token, confidence), ...] from `_run_tsv`.
+    Returns: the median confidence (0..100), or 0.0 when nothing legible was read.
+    """
     cs = sorted(c for w, c in words if c >= 0 and len(re.findall(r"[A-Za-z]", w)) >= 2)
     return float(cs[len(cs) // 2]) if cs else 0.0
 
