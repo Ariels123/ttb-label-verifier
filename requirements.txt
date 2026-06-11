@@ -1,5 +1,6 @@
 Flask>=3.0
 Pillow>=10.0
+pillow-heif>=0.16        # decode .heic/.heif (iPhone photos); registered in ocr.py
 rapidfuzz>=3.0
 gunicorn>=21.0
 opencv-python-headless>=4.8

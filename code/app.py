@@ -41,6 +41,7 @@ Run:  python app.py        ->  http://localhost:5050
 """
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import threading
@@ -182,12 +183,17 @@ def verify_text():
         client_ms = max(0, int(data.get("client_ms") or 0))
     except (TypeError, ValueError):
         client_ms = 0
-    # Optional per-word confidence from the browser OCR engine (Tesseract.js), capped for safety.
+    # Optional per-word confidence from the browser OCR engine (Tesseract.js). Untrusted input,
+    # so sanitize hard: each item must be a [word, conf] pair with a FINITE numeric conf (reject
+    # bool — a Python bool is an int subclass — and NaN/inf), and clamp every conf to 0..100 so a
+    # crafted payload can't produce a NaN/out-of-range confidence pill downstream.
     raw_words = data.get("words")
     words = None
     if isinstance(raw_words, list):
-        words = [(str(w[0])[:60], float(w[1])) for w in raw_words[:5000]
-                 if isinstance(w, (list, tuple)) and len(w) == 2 and isinstance(w[1], (int, float))]
+        words = [(str(w[0])[:60], max(0.0, min(100.0, float(w[1])))) for w in raw_words[:5000]
+                 if isinstance(w, (list, tuple)) and len(w) == 2
+                 and isinstance(w[1], (int, float)) and not isinstance(w[1], bool)
+                 and math.isfinite(w[1])]
     try:
         mean_conf = data.get("mean_conf")
         mean_conf = max(0.0, min(100.0, float(mean_conf))) if mean_conf is not None else None
@@ -794,7 +800,7 @@ function renderBatch(items,elapsed,useBrowser){
     const resLabel=warnOnly?'OK':(x.passed?'PASS':(lowOnly?'CHECK':'FAIL'));
     const brand = (x.results || []).find(r => r.field === 'Brand name');
     const brandTxt = brand && brand.detected ? brand.detected : '';
-    const issue=x.unreadable?'Couldn’t read this image — try a clearer photo':(warnOnly? (brandTxt ? brandTxt + ' (Warning OK)' : 'Government Warning present'):(x.passed?'None':(lowOnly?'Some fields couldn’t be read — open to verify':'Missing/Mismatch: '+esc((x.fails||[]).join(', ')))));
+    const issue=x.unreadable?'Couldn’t read this image — try a clearer photo':(warnOnly? (brandTxt ? esc(brandTxt) + ' (Warning OK)' : 'Government Warning present'):(x.passed?'None':(lowOnly?'Some fields couldn’t be read — open to verify':'Missing/Mismatch: '+esc((x.fails||[]).join(', ')))));
     h+='<tr class="brow '+rowClass+'" onclick="toggleBatchRow('+i+')" title="Click to see the label image and full details"><td class="expcell"><span class="exp" id="exp_'+i+'">&#9656;</span></td><td><span class="badge '+badgeClass+'">'+resLabel+'</span></td><td class="fieldname">'+esc(x.filename)+'</td><td class="note">'+issue+'</td><td class="note">'+whereLabel(x.engine)+'</td><td class="note">'+((x.total_ms||0)/1000).toFixed(1)+'s</td></tr>';
     h+='<tr class="bdetail '+rowClass+'" id="bd_'+i+'"><td colspan="6"></td></tr>';
   });

@@ -53,6 +53,16 @@ import time
 
 from PIL import Image, ImageOps
 
+# Teach PIL to decode .heic/.heif (the default format for iPhone photos, which a reviewer is
+# very likely to upload). Optional: if pillow-heif isn't installed, HEIC simply isn't supported
+# and the upload fails gracefully like any other undecodable file.
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HAVE_HEIF = True
+except Exception:  # pragma: no cover
+    HAVE_HEIF = False
+
 Image.MAX_IMAGE_PIXELS = 64_000_000  # decompression-bomb guard (~64 MP); enforced because we
 # open every upload through PIL in _working_image (PIL raises past 2x this on a pixel bomb).
 
