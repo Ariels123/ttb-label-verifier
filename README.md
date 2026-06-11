@@ -12,7 +12,7 @@ federal firewall.
 
 > **Reviewer quick start (no setup):** open the live demo → click a built-in example such as
 > **"✗ wrong ABV"** to see a FAIL, or **"✓ correct"** to see an all-PASS → then drag in one of the
-> real label photos from [`sample_images/`](sample_images) to try a genuine photo.
+> real-world label photos (the `wm*.jpg` files in [`sample_images/`](sample_images)) to try a genuine photo.
 
 ---
 
@@ -99,8 +99,7 @@ code/                    the application code
   gen_and_test.py        dev helper: regenerate the demo labels + run the OCR/verify self-test
   make_samples.py        dev helper: regenerate the three base demo labels
 tests/                   unit tests for the compliance-critical rules
-examples/                9 synthetic demo labels — the app's "Try an example" set
-sample_images/           19 real-world label photos to test the app with
+sample_images/           9 synthetic demo labels (the "Try an example" set) + 19 real-world test photos
 requirements.txt         Python dependencies
 Dockerfile               container image (Tesseract + OpenCV baked in)
 ```

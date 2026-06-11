@@ -18,7 +18,7 @@ THE THREE THINGS IT SERVES
                           image never leaves the user's machine — see the handler's docstring)
        POST /batch        many images + one optional field template -> list of results
        GET  /health       liveness probe for the deploy
-       GET  /examples/<f> serves the built-in demo labels for the "Try an example" links
+       GET  /sample_images/<f> serves the built-in demo labels for the "Try an example" links
   3. Static-ish bits: a favicon drawn inline as SVG.
 
 DESIGN BARS (from the brief's stakeholders)
@@ -130,15 +130,16 @@ def health():
     return jsonify({"ok": True})
 
 
-# The built-in synthetic demo labels live in examples/ at the REPO ROOT — one level up from
-# this code/ folder (dirname of __file__, then its parent). The "Try an example" links fetch them.
-EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+# The sample images (the synthetic demo labels the "Try an example" links use, alongside the
+# real-world test photos) live in sample_images/ at the REPO ROOT — one level up from this code/
+# folder (dirname of __file__, then its parent).
+SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_images")
 
 
-@app.get("/examples/<path:name>")
+@app.get("/sample_images/<path:name>")
 def example(name):
     """Serve a built-in demo label by filename (send_from_directory guards against traversal)."""
-    return send_from_directory(EXAMPLES_DIR, name)
+    return send_from_directory(SAMPLES_DIR, name)
 
 
 @app.get("/favicon.ico")
@@ -476,7 +477,7 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
      - optionally OCR the image IN THE BROWSER (Tesseract.js) and post only the text, so
        the image never leaves the user's machine; otherwise upload the image to the server
      - render the per-field result table (status, expected, detected + confidence)
-   Server endpoints used:  /verify (image)  /verify_text (browser text)  /batch  /examples/<f>
+   Server endpoints used:  /verify (image)  /verify_text (browser text)  /batch  /sample_images/<f>
    The server is always the source of truth; browser OCR is an advisory fast path that
    automatically falls back to the server if it can't read an image.
    Sections below are marked with banner comments:  ==== SECTION ====
@@ -525,7 +526,7 @@ async function loadExample(name){
   ['brand_name','class_type','alcohol_content','net_contents','producer','origin'].forEach(k=>{$(k).value=f[k]||'';});
   $('result').innerHTML='<div class="hint">Loading example&hellip;</div>';
   try{
-    const blob=await (await fetch('/examples/'+name)).blob();
+    const blob=await (await fetch('/sample_images/'+name)).blob();
     singleFile=new File([blob],name,{type:blob.type||'image/png'});
     preview(); verifyOne();
   }catch(e){$('result').innerHTML='<div class="err">Could not load example: '+esc(e.message)+'</div>';}

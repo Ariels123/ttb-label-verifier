@@ -1,4 +1,6 @@
-sample_images/
+# sample_images/ holds the demo labels the app serves (must ship) PLUS the real-world test
+# photos (wm*). Ship only the demo labels; keep the heavy real photos out of the image.
+sample_images/wm*
 __pycache__/
 *.pyc
 .git/

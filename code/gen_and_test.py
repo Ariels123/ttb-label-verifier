@@ -13,7 +13,7 @@ sys.path.insert(0, str(HERE))
 import ocr
 import verifier
 
-OUT = HERE.parent / "examples"  # examples/ sits at the repo root, one level above this code/ folder
+OUT = HERE.parent / "sample_images"  # sample_images/ sits at the repo root, above this code/ folder
 OUT.mkdir(exist_ok=True)
 WARN = verifier.GOV_WARNING
 

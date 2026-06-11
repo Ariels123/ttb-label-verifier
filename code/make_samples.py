@@ -1,15 +1,15 @@
 """Generate synthetic TTB label images for testing — one correct, two deliberately broken.
 
-Saves into examples/ (the labels the app's "Try an example" links serve). Lets you
-exercise the verifier end-to-end without hunting for real label photos. The brief even
-suggests AI-generated test labels; these are clean synthetic ones drawn with Pillow.
-(See gen_and_test.py for the fuller set + the OCR/verify self-test.)
+Saves into sample_images/ (the labels the app's "Try an example" links serve, which also holds
+the real-world test photos). Lets you exercise the verifier end-to-end without hunting for real
+label photos. The brief even suggests AI-generated test labels; these are clean synthetic ones
+drawn with Pillow. (See gen_and_test.py for the fuller set + the OCR/verify self-test.)
 """
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-OUT = Path(__file__).parent.parent / "examples"  # examples/ is at the repo root, above this code/ folder
+OUT = Path(__file__).parent.parent / "sample_images"  # at the repo root, above this code/ folder
 OUT.mkdir(exist_ok=True)
 
 WARNING_CAPS = (
