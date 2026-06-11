@@ -1,0 +1,9 @@
+Flask>=3.0
+Pillow>=10.0
+rapidfuzz>=3.0
+gunicorn>=21.0
+opencv-python-headless>=4.8
+numpy>=1.24
+# PaddleOCR (heavy Tier-3 fallback) is intentionally NOT installed here — it OOMs a
+# 2GB box. The code degrades gracefully without it (HAVE_PADDLE=False). Add
+# `paddlepaddle` + `paddleocr` on a larger box to enable the Tier-3 fallback.

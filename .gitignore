@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local OCR temp dir (readable-TMPDIR workaround for local dev)
+.tmp/
+
+# Tooling / OS artifacts
+.playwright-mcp/
+.DS_Store
+*.log
