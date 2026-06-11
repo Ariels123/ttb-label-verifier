@@ -134,6 +134,22 @@ dump). Optionally add a shared application template for same-product batches. Re
 **"show only failures"** filter, **expandable rows** (click to see the label image + full field
 detail), a sticky header, and **CSV export**.
 
+## Audit logging
+
+Every request is logged so you can see **who** accessed the tool, **when**, and **what result**
+they got. Because the tool has no login, "who" is the client **IP address + user-agent** (not a
+person's identity — true per-user identity would require adding authentication). Each verification
+also records the entered application values and the values detected on the label (full-audit mode).
+
+- **Where:** JSON lines in a rotating file — `TTB_AUDIT_LOG` (default: `ttb-audit.log` under
+  `TMPDIR`, which in the deployed setup is the mounted volume, so it survives container restarts;
+  rotated at 10 MB × 5 backups). A concise one-line summary (no sensitive field values) also goes
+  to the container log.
+- **Read it (deployed):** `docker logs ttb-verifier` for the quick who/when/what trail, or read the
+  JSON file on the host volume for the full per-field detail.
+- **No web endpoint exposes the log** — it is readable only on the server. Health-check and favicon
+  requests are excluded as noise.
+
 ## Running
 
 ```bash

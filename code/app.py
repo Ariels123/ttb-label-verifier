@@ -41,14 +41,18 @@ Run:  python app.py        ->  http://localhost:5050
 """
 from __future__ import annotations
 
+import json
+import logging
+import logging.handlers
 import math
 import os
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, g, jsonify, request, send_from_directory
 
 import ocr
 import verifier
@@ -66,6 +70,132 @@ MAX_TEXT_LEN = 20_000                 # a real label's text is < 2 KB; cap the c
 _OCR_SEM = threading.BoundedSemaphore(max(1, os.cpu_count() or 2))
 
 _ALLOWED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic"}
+
+
+# ============================================================================================
+# AUDIT / ACCESS LOGGING
+# --------------------------------------------------------------------------------------------
+# Records, for every request: WHO (client IP + user-agent — the tool has no login, so this is
+# the best available identity, NOT a person), WHEN (UTC timestamp), and WHAT RESULT they got.
+# This is FULL-AUDIT mode: on the verification endpoints the record also includes the entered
+# application values and the values detected on the label (i.e. potentially sensitive content),
+# by deliberate choice. Two sinks:
+#   * a rotating JSON-lines FILE (the system of record) — full detail, persists across restarts
+#     because it defaults under TMPDIR, which in production is the mounted volume. Rotated at
+#     10 MB x 5 so it can't fill the disk. Override the path with TTB_AUDIT_LOG.
+#   * the CONTAINER LOG (stderr -> `docker logs`) — a CONCISE one-line summary only (no sensitive
+#     field values), for a quick who/when/what trail.
+# There is intentionally NO web endpoint exposing the log; read it on the box.
+AUDIT_LOG_PATH = os.environ.get("TTB_AUDIT_LOG") or os.path.join(tempfile.gettempdir(), "ttb-audit.log")
+
+_audit_file = logging.getLogger("ttb.audit.file")      # full JSON -> rotating file
+_audit_file.setLevel(logging.INFO)
+_audit_file.propagate = False
+try:
+    _afh = logging.handlers.RotatingFileHandler(AUDIT_LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=5)
+    _afh.setFormatter(logging.Formatter("%(message)s"))
+    _audit_file.addHandler(_afh)
+except Exception:                                      # read-only fs etc. -> file sink simply disabled
+    pass
+
+_audit_console = logging.getLogger("ttb.audit.console")  # concise summary -> container log
+_audit_console.setLevel(logging.INFO)
+_audit_console.propagate = False
+_ach = logging.StreamHandler()
+_ach.setFormatter(logging.Formatter("AUDIT %(message)s"))
+_audit_console.addHandler(_ach)
+
+_NO_AUDIT_PATHS = {"/health", "/favicon.ico"}            # infra noise — don't log
+
+
+def _client_ip(req) -> str:
+    """Best-effort client IP: prefer X-Forwarded-For (if a reverse proxy is ever put in front),
+    else the direct peer address."""
+    xff = req.headers.get("X-Forwarded-For", "")
+    return (xff.split(",")[0].strip() if xff else "") or (req.remote_addr or "?")
+
+
+def _verdict(result: dict) -> str:
+    """One-word outcome for the audit line."""
+    rs = result.get("results", [])
+    if result.get("unreadable"):
+        return "unreadable"
+    if any(r["status"] == "fail" for r in rs):
+        return "fail"
+    if any(r["status"] == "lowconf" for r in rs):
+        return "needs_review"
+    return "pass" if result.get("provided") else "extracted"
+
+
+def _result_detail(result: dict) -> dict:
+    """The 'what result' half of a record. FULL-AUDIT: includes per-field expected + detected."""
+    counts = {}
+    for r in result.get("results", []):
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {
+        "engine": result.get("engine", "server"),
+        "filename": result.get("filename"),
+        "verdict": _verdict(result),
+        "passed": result.get("passed"),
+        "provided": result.get("provided"),
+        "counts": counts,
+        "result_ms": result.get("total_ms"),
+        "fields": [{"field": r["field"], "expected": r.get("expected"),
+                    "detected": r.get("detected"), "status": r["status"]}
+                   for r in result.get("results", [])],
+    }
+
+
+def _write_audit(rec: dict) -> None:
+    """Emit one audit record: full JSON to the file, a concise summary to the container log.
+    Best-effort — logging must NEVER break the actual request."""
+    try:
+        _audit_file.info(json.dumps(rec, ensure_ascii=False))
+    except Exception:
+        pass
+    try:
+        summary = f"{rec.get('ip','?')} {rec.get('method','')} {rec.get('path','')} -> {rec.get('status','')}"
+        if rec.get("verdict"):
+            summary += f" [{rec['verdict']} {rec.get('filename') or '-'} {rec.get('result_ms','?')}ms]"
+        _audit_console.info(summary)
+    except Exception:
+        pass
+
+
+@app.before_request
+def _audit_before():
+    g._audit_t0 = time.time()
+
+
+@app.after_request
+def _audit_after(resp):
+    """Single audit-logging point. Logs every request (except health/favicon), enriched with the
+    full per-field result on verification endpoints (the handlers stash detail on `g`)."""
+    try:
+        if request.path in _NO_AUDIT_PATHS:
+            return resp
+        env = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "ip": _client_ip(request),
+            "ua": (request.headers.get("User-Agent") or "")[:300],
+            "method": request.method,
+            "path": request.path,
+            "status": resp.status_code,
+            "ms": int((time.time() - getattr(g, "_audit_t0", time.time())) * 1000),
+        }
+        batch = getattr(g, "_audit_batch", None)
+        detail = getattr(g, "_audit_detail", None)
+        if batch is not None:                          # one small line per label (atomic, greppable)
+            _write_audit({**env, "batch": True, "n": len(batch)})
+            for item in batch:
+                _write_audit({**env, **_result_detail(item)})
+        elif detail is not None:
+            _write_audit({**env, **detail})
+        else:                                          # page load / example fetch / error
+            _write_audit(env)
+    except Exception:
+        pass                                           # never let logging break a response
+    return resp
 
 
 def _safe_suffix(filename: str) -> str:
@@ -159,7 +289,9 @@ def verify_one():
     if not f:
         return jsonify({"error": "Please choose a label image."}), 400
     fields = {k: (request.form.get(k) or "").strip() for k in FIELD_KEYS}
-    return jsonify(_verify_upload(f, fields))
+    result = _verify_upload(f, fields)
+    g._audit_detail = _result_detail(result)   # audit log captures the full per-field result
+    return jsonify(result)
 
 
 @app.post("/verify_text")
@@ -205,6 +337,7 @@ def verify_text():
     result["filename"] = str(data.get("filename") or "browser-ocr")[:200]
     result["engine"] = "browser"
     result["advisory"] = True  # client-supplied text — applicant pre-flight, not a reviewer-grade decision
+    g._audit_detail = _result_detail(result)   # audit log captures the full per-field result
     return jsonify(result)
 
 
@@ -283,6 +416,7 @@ def verify_batch():
             if path and os.path.exists(path):
                 os.unlink(path)
 
+    g._audit_batch = items   # audit log writes one full per-field record per label in the batch
     return jsonify({"items": items})
 
 
