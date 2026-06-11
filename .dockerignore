@@ -1,6 +1,7 @@
-samples/
+sample_images/
 __pycache__/
 *.pyc
 .git/
 .DS_Store
 make_samples.py
+gen_and_test.py

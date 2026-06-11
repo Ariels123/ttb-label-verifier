@@ -10,6 +10,10 @@ federal firewall.
 
 **Live demo:** http://178.156.185.31:8080 · **Run locally:** [below](#running).
 
+> **Reviewer quick start (no setup):** open the live demo → click a built-in example such as
+> **"✗ wrong ABV"** to see a FAIL, or **"✓ correct"** to see an all-PASS → then drag in one of the
+> real label photos from [`sample_images/`](sample_images) to try a genuine photo.
+
 ---
 
 ## What it does
@@ -19,9 +23,10 @@ There are two things going on, on one screen:
 1. **Verification (the core task).** The agent enters the application fields (what the COLA
    application claims), uploads the label, and the tool confirms the label matches — with a
    clear per-field PASS / FAIL and a strict check on the Government Warning.
-2. **Extraction.** The tool also **reads each field off the label** ("Detected on label") and
-   shows it next to the application value, each with a **read-confidence** pill. So even with no
-   application data entered, you see what the label says and how confident the OCR was.
+2. **Reading the label (extraction).** The tool also **reads each field off the label**
+   ("Detected on label") and shows it next to the application value, each with a **read-confidence**
+   pill. So even with no application data entered, you see what the label says and how confident the
+   OCR was.
 
 Keeping "Expected (application)" and "Detected (label)" as two separate columns is deliberate:
 they're two independent sources, so comparing them is real verification — never the circular trap
@@ -30,7 +35,9 @@ of checking the label against itself.
 ## How a result reads
 
 Each field row shows a **status**, the **expected** (application) value, the **detected** (label)
-value + confidence, and a note:
+value + confidence, and a note. **Only FAIL is a real problem** — CHECK BY EYE means the OCR
+couldn't read that field (verify it manually), and DETECTED / NOT ENTERED are informational, not
+failures:
 
 | Status | Meaning |
 |---|---|
@@ -81,7 +88,34 @@ image ─► ocr.py (local: PIL → Tesseract + OpenCV) ─► text + per-word c
 - **`app.py`** — Flask app + the single-file UI. Endpoints: `/verify` (image), `/batch`, and
   `/verify_text` (browser-extracted text). A global semaphore caps total concurrent Tesseract so
   simultaneous batches can't saturate the box; uploads and the JSON path are size-capped.
-- **`tests/test_verifier.py`** — unit tests for the compliance-critical rules and extraction.
+
+## Repository layout
+
+```
+app.py            Flask server + the single-page UI (HTML/CSS/JS inline)
+verifier.py       matching + extraction engine (framework-free, unit-tested)
+ocr.py            local OCR ladder (PIL → Tesseract + OpenCV)
+requirements.txt  Python dependencies
+Dockerfile        container image (Tesseract + OpenCV baked in)
+tests/            unit tests for the compliance-critical rules
+examples/         9 synthetic demo labels — the app's "Try an example" set
+sample_images/    19 real-world label photos to test the app with
+gen_and_test.py   dev helper: regenerate the demo labels + run the OCR/verify self-test
+make_samples.py   dev helper: regenerate the three base demo labels
+```
+
+## Tests
+
+```bash
+python3 -m pytest tests/     # unit tests — the compliance-critical matching rules
+python3 gen_and_test.py      # renders the demo labels + runs them end-to-end through OCR + verify
+```
+
+The unit tests lock in the rules that must not regress: the strict Government Warning (exact wording
++ ALL-CAPS heading, line-wrap tolerant), numeric ABV (proof handling, no 3-digit truncation),
+volume-normalized net contents, and the confidence/plausibility gating that keeps extraction silent
+on a poor read. `gen_and_test.py` is an end-to-end check: it asserts the expected PASS/FAIL verdict
+for each synthetic label.
 
 ## Browser OCR (optional, advisory)
 

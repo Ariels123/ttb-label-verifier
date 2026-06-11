@@ -13,10 +13,8 @@ sys.path.insert(0, str(HERE))
 import ocr
 import verifier
 
-OUT = HERE / "samples"
-EX = HERE / "examples"
+OUT = HERE / "examples"  # synthetic demo labels live here (also served by the app)
 OUT.mkdir(exist_ok=True)
-EX.mkdir(exist_ok=True)
 WARN = verifier.GOV_WARNING
 
 
@@ -63,7 +61,6 @@ def make(name, lines, warning):
             d.text((bx0 + 12, yy), ln, font=fnt, fill=(40, 30, 15))
             yy += 30
     img.save(OUT / name)
-    img.save(EX / name)
     return OUT / name
 
 
