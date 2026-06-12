@@ -519,6 +519,15 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
 .ocrtoggle em{font-style:normal;color:var(--mut);font-weight:400}
 .privacy{margin-top:10px;color:var(--green);font-size:16px;font-weight:700}
 .fallback{margin-top:18px;background:#fff7e6;color:#8a5a00;border:2px solid #e6b800;border-radius:12px;padding:14px 18px;font-size:16px;font-weight:600;line-height:1.45}
+.enginepick{margin-top:16px}
+.englabel{font-weight:700;font-size:15px;color:var(--ink);margin-bottom:8px}
+.engopt{display:grid;grid-template-columns:22px 1fr;gap:4px 10px;align-items:start;padding:9px 0;cursor:pointer;border-top:1px solid var(--line)}
+.engopt input{width:20px;height:20px;cursor:pointer;margin-top:2px;grid-row:span 2}
+.engname{font-weight:700;font-size:15px;color:var(--ink)}
+.engdesc{font-size:14px;color:var(--mut);line-height:1.4}
+.engflag{display:inline-block;margin-left:6px;font-size:12px;font-weight:700;color:#a3201a;background:#fdecea;border:1px solid #f0b3ad;border-radius:6px;padding:1px 7px;vertical-align:1px}
+.engok{display:inline-block;margin-left:6px;font-size:12px;font-weight:700;color:var(--green);background:var(--greenbg);border-radius:6px;padding:1px 7px;vertical-align:1px}
+.engwarn{display:none;margin-top:10px;background:#fdecea;color:#7a1a13;border:2px solid #e0897f;border-radius:12px;padding:13px 16px;font-size:14.5px;font-weight:500;line-height:1.5}
 .prog{margin-top:14px;height:10px;background:#e7edf5;border-radius:6px;overflow:hidden}
 .progbar{height:100%;width:0;background:var(--blue);transition:width .25s}
 @keyframes indet{0%{transform:translateX(-110%)}100%{transform:translateX(260%)}}
@@ -585,10 +594,19 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
      <a href="#" onclick="loadExample('sample_sideways.png');return false">&#8635; sideways</a>
    </div>
    <details class="advanced" open><summary>Privacy &amp; advanced options</summary>
-   <label class="ocrtoggle" title="Scans the label in your browser with Tesseract.js; falls back to the secure server only if it can't read the image">
-     <input type="checkbox" id="browserOcr" checked>
-     <span>&#9889; Scan privately in my browser <em>(runs a powerful AI OCR model on your own device — the image stays on your computer; falls back to the secure server if needed)</em></span>
-   </label>
+   <div class="enginepick" role="radiogroup" aria-label="OCR engine">
+     <div class="englabel">&#9889; OCR engine <em style="font-weight:400;color:var(--mut)">— runs on your device unless noted; the image never leaves your computer for the browser engines</em></div>
+     <label class="engopt"><input type="radio" name="engine" value="paddle" checked onchange="engineChanged('')">
+       <span class="engname">PaddleOCR (PP-OCRv5)<span class="engflag">&#9888; Baidu &middot; China</span></span>
+       <span class="engdesc">Most accurate. Deep-learning OCR running on your device&rsquo;s GPU; the image stays on your computer. Falls back to the secure server if it can&rsquo;t read an image.</span></label>
+     <label class="engopt"><input type="radio" name="engine" value="tesseract" onchange="engineChanged('')">
+       <span class="engname">Tesseract<span class="engok">open-source</span></span>
+       <span class="engdesc">Fully open-source (Apache 2.0). Lighter but less accurate on photos; runs on your device, image stays local.</span></label>
+     <label class="engopt"><input type="radio" name="engine" value="server" onchange="engineChanged('')">
+       <span class="engname">Secure server</span>
+       <span class="engdesc">Uploads the image and runs OCR on the TTB server &mdash; no in-browser engine. Use if your policy disallows in-browser AI models.</span></label>
+     <div id="engWarn" class="engwarn"></div>
+   </div>
    </details>
   </div>
  </div>
@@ -625,10 +643,19 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
  </div>
  </details>
  <details class="advanced" open><summary>Privacy &amp; advanced options</summary>
- <label class="ocrtoggle" title="Scans each label in your browser; any image it can't read falls back to the secure server">
-   <input type="checkbox" id="b_browserOcr" checked>
-   <span>&#9889; Scan privately in my browser <em>(runs a powerful AI OCR model on your own device — ideal for large batches; unreadable images fall back to the secure server)</em></span>
- </label>
+ <div class="enginepick" role="radiogroup" aria-label="OCR engine for batch">
+   <div class="englabel">&#9889; OCR engine <em style="font-weight:400;color:var(--mut)">— used for every label in the batch</em></div>
+   <label class="engopt"><input type="radio" name="b_engine" value="paddle" checked onchange="engineChanged('b_')">
+     <span class="engname">PaddleOCR (PP-OCRv5)<span class="engflag">&#9888; Baidu &middot; China</span></span>
+     <span class="engdesc">Most accurate. Deep-learning OCR on your device&rsquo;s GPU; images stay on your computer. Ideal for large batches.</span></label>
+   <label class="engopt"><input type="radio" name="b_engine" value="tesseract" onchange="engineChanged('b_')">
+     <span class="engname">Tesseract<span class="engok">open-source</span></span>
+     <span class="engdesc">Fully open-source (Apache 2.0). Lighter, less accurate; runs on your device.</span></label>
+   <label class="engopt"><input type="radio" name="b_engine" value="server" onchange="engineChanged('b_')">
+     <span class="engname">Secure server</span>
+     <span class="engdesc">Uploads each image and runs OCR on the TTB server &mdash; no in-browser engine.</span></label>
+   <div id="b_engWarn" class="engwarn"></div>
+ </div>
  </details>
  <button class="go" id="bGoBtn" onclick="verifyBatch()">Start Batch Verification</button>
  <div class="result" id="bresult" role="status" aria-live="polite"></div>
@@ -667,10 +694,14 @@ const CAP={fetch:typeof window.fetch==='function',
   if(!CAP.file)missing.push('local file reading (File API)');
   if(missing.length){const w=$('capWarn');if(w){w.style.display='';
     w.textContent='Your browser is missing: '+missing.join(', ')+'. Please update to a current browser (Chrome, Edge, Firefox, or Safari) to use this tool.';}}
-  ['browserOcr','b_browserOcr'].forEach(id=>{const t=$(id);
-    if(t&&!CAP.worker){t.checked=false;t.disabled=true;
-      const lbl=t.closest('.ocrtoggle');if(lbl){lbl.title='In-browser OCR needs Web Workers, which this browser does not support.';
-        const em=lbl.querySelector('em');if(em)em.textContent='(unavailable in this browser — secure server processing will be used)';}}});
+  // In-browser engines (PaddleOCR / Tesseract.js) need Web Workers + WebAssembly. If absent,
+  // disable them and force the "Secure server" engine.
+  if(!CAP.worker || typeof WebAssembly!=='object'){
+    ['engine','b_engine'].forEach(grp=>document.querySelectorAll('input[name="'+grp+'"]').forEach(r=>{
+      if(r.value==='server'){r.checked=true;} else {r.disabled=true; const o=r.closest('.engopt'); if(o)o.style.opacity='.5';}
+    }));
+  }
+  engineChanged(''); engineChanged('b_');   // reflect the initial selection (show the Baidu warning if default)
 })();
 
 /* ==== SINGLE LABEL: file selection, examples, preview ============================== */
@@ -785,6 +816,24 @@ async function bestBrowserOcr(file,onProg){
   const r=await browserOcr(file,onProg); r.engine='tesseract'; return r;
 }
 
+// ---- Engine selector ----------------------------------------------------------------------
+// Read the chosen engine from the radio group ('' = single panel, 'b_' = batch panel).
+function selectedEngine(p){ const r=document.querySelector('input[name="'+(p?'b_engine':'engine')+'"]:checked'); return (r&&r.value)||'server'; }
+// Show/hide the foreign-software (Baidu) warning when PaddleOCR is the selected engine.
+function engineChanged(p){
+  const w=$(p+'engWarn'); if(!w) return;
+  if(selectedEngine(p)==='paddle'){
+    w.style.display='block';
+    w.innerHTML='&#9888;&#65039; <b>PaddleOCR is developed by Baidu, a company based in China.</b> Selecting it runs Baidu&rsquo;s OCR models inside your browser. Your label image stays on your device &mdash; but the OCR software itself originates from China. Review your organization&rsquo;s policy on foreign-developed software before using this option in a government environment. The open-source <b>Tesseract</b> and <b>Secure server</b> options avoid this.';
+  } else { w.style.display='none'; w.innerHTML=''; }
+}
+// Run one in-browser engine by name. 'paddle' = deep PP-OCR (with a Tesseract.js safety net);
+// 'tesseract' = Tesseract.js only (no Baidu code loaded).
+async function runEngine(engine,file,onProg){
+  if(engine==='tesseract'){ const r=await browserOcr(file,onProg); r.engine='tesseract'; return r; }
+  return await bestBrowserOcr(file,onProg);
+}
+
 function wordCount(t){return (String(t||'').match(/[A-Za-z]{3,}/g)||[]).length;}
 function setBusy(btn,on){if(btn){btn.disabled=on;btn.setAttribute('aria-busy',on?'true':'false');}}
 function showProgress(p){const b=$('prog');if(b){b.style.display='block';b.classList.remove('indet');$('progbar').style.width=Math.max(3,p||0)+'%';}}
@@ -813,7 +862,8 @@ async function verifyOne(){
   if(!singleFile){$('result').innerHTML='<div class="err">Please select a label image first.</div>';return;}
   if(!/^image\//.test(singleFile.type||'')&&!/\.(png|jpe?g|gif|bmp|tiff?|webp|heic)$/i.test(singleFile.name||'')){
     $('result').innerHTML='<div class="err">That file does not look like an image. Please choose a JPG or PNG photo of the label.</div>';return;}
-  const useBrowser=$('browserOcr')&&$('browserOcr').checked&&!$('browserOcr').disabled;
+  const engine=selectedEngine('');               // 'paddle' | 'tesseract' | 'server'
+  const useBrowser=(engine!=='server');
   setBusy($('goBtn'),true);
   showWorking($('result'), useBrowser?'Reading the label in your browser…':'Checking the label…');
   let d=null, fellBack='';
@@ -822,8 +872,8 @@ async function verifyOne(){
       try{
         $('goBtn').textContent='Reading in your browser…';showProgress(0);
         const t0=Date.now();
-        const res=await bestBrowserOcr(singleFile,p=>{showProgress(p);$('goBtn').textContent='Reading in your browser… '+p+'%';});
-        if(wordCount(res.text)<6) throw new Error('__LOWREAD__');  // even the fallback engine failed -> server
+        const res=await runEngine(engine,singleFile,p=>{showProgress(p);$('goBtn').textContent='Reading in your browser… '+p+'%';});
+        if(wordCount(res.text)<6) throw new Error('__LOWREAD__');  // chosen browser engine failed -> server
         const body={ocr_text:res.text,filename:singleFile.name,client_ms:Date.now()-t0,words:res.words,mean_conf:res.meanConf};
         ['brand_name','class_type','alcohol_content','net_contents','producer','origin'].forEach(k=>body[k]=$(k).value);
         d=await (await fetch('/verify_text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
@@ -909,7 +959,8 @@ $('bfile').addEventListener('change',e=>{batchFiles=[...e.target.files];$('bresu
 
 async function verifyBatch(){
   if(!batchFiles.length){$('bresult').innerHTML='<div class="err">Please select at least one image.</div>';return;}
-  const useBrowser=$('b_browserOcr')&&$('b_browserOcr').checked;
+  const engine=selectedEngine('b_');               // 'paddle' | 'tesseract' | 'server'
+  const useBrowser=(engine!=='server');
   $('bGoBtn').disabled=true;
   showWorking($('bresult'),'Checking '+batchFiles.length+' label'+(batchFiles.length>1?'s':'')+'… please keep this page open.');
   const fields={};['brand_name','class_type','alcohol_content','net_contents','producer','origin'].forEach(k=>fields[k]=$('b_'+k).value);
@@ -917,7 +968,7 @@ async function verifyBatch(){
   try{
     let items;
     if(useBrowser){
-      items=await browserOcrBatch(batchFiles,fields,(done,total)=>{$('bGoBtn').textContent='Reading in your browser… '+done+'/'+total;updateWorking(done,total);});
+      items=await browserOcrBatch(batchFiles,fields,engine,(done,total)=>{$('bGoBtn').textContent='Reading in your browser… '+done+'/'+total;updateWorking(done,total);});
     }else{
       $('bGoBtn').textContent='Parallel Processing ('+batchFiles.length+' labels)...';
       const fd=new FormData();batchFiles.forEach(f=>fd.append('images',f));
@@ -939,7 +990,7 @@ async function verifyBatch(){
 // Batch OCR in the browser: ONE reused Tesseract worker reads every image
 // sequentially (safe on weak devices; the server never touches the images). Each
 // image's text is verified via /verify_text, mapped to the server batch row shape.
-async function browserOcrBatch(files,fields,onProg){
+async function browserOcrBatch(files,fields,engine,onProg){
   const items=[];
   const verifyImageOnServer=async(file)=>{
     const fd=new FormData();fd.append('image',file);Object.keys(fields).forEach(k=>fd.append(k,fields[k]));
@@ -952,7 +1003,7 @@ async function browserOcrBatch(files,fields,onProg){
     const file=files[i];onProg(i,files.length);
     const it0=Date.now();
     try{
-      const res=await bestBrowserOcr(file);          // deep PP-OCR first, Tesseract.js fallback
+      const res=await runEngine(engine,file);        // chosen engine (paddle deep / tesseract)
       if(wordCount(res.text)<6){
         // Even the fallback engine failed on this image -> secure server.
         items.push(row(file,await verifyImageOnServer(file),Date.now()-it0,'server'));

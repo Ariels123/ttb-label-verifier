@@ -124,18 +124,27 @@ OCR is the heavy part, so by default it runs **in the user's own browser, on the
 the server; the image never leaves the user's machine. The in-browser engine is tiered, strongest
 first:
 
-1. **PP-OCRv5 deep model** (PaddleOCR family) via **ONNX Runtime Web**, GPU-accelerated with
-   **WebGPU** (automatic WASM fallback). This is the most accurate engine in the whole system —
-   markedly better than Tesseract on real label photos — and it runs entirely client-side. Models
-   (~a few MB) download once from a CDN and are then browser-cached.
-2. **Tesseract.js** — fallback if the deep model can't load/run (older browser, no WebAssembly).
-3. **Secure server** (the light Tesseract path below) — only if in-browser OCR fails entirely; the
-   UI says so when it happens.
+The user **chooses the engine** from a labelled selector (each option carries a one-line
+description), strongest first:
 
-It's **advisory**: client-supplied text is untrusted, so the server remains the source of truth for
-any authoritative decision (and the `/verify_text` inputs are hard-capped + sanitized against
-abuse). The server's own OCR is deliberately kept lightweight (Tesseract, no heavy models) because
-the heavy lifting now happens on the client.
+1. **PaddleOCR (PP-OCRv5)** — the deep model via **ONNX Runtime Web**, GPU-accelerated with
+   **WebGPU** (automatic WASM fallback). The most accurate engine in the whole system — markedly
+   better than Tesseract on real label photos — running entirely client-side; models (~a few MB)
+   download once from a CDN and are browser-cached. **⚠ Foreign-software notice:** PaddleOCR is
+   developed by **Baidu (China)**. Selecting it runs Baidu's OCR models in the user's browser (the
+   image still never leaves the device, but the *software* originates from China), so the UI shows
+   an explicit warning to select it — important in a government context. If the deep model can't
+   read an image it falls back to the secure server.
+2. **Tesseract** (Tesseract.js) — fully **open-source** (Apache 2.0); lighter, less accurate on
+   photos, and loads **no Baidu code**. The safe choice when policy disallows foreign-developed AI.
+3. **Secure server** — uploads the image and runs the light server-side Tesseract; no in-browser
+   engine at all.
+
+Browser OCR is **advisory**: client-supplied text is untrusted, so the server remains the source of
+truth for any authoritative decision (and the `/verify_text` inputs are hard-capped + sanitized
+against abuse). The server's own OCR is deliberately kept lightweight (Tesseract, no heavy models)
+because the heavy lifting now happens on the client. *(Default engine is configurable; for a strict
+federal posture, default to Tesseract or Secure server so foreign-developed software is opt-in.)*
 
 ## Batch mode
 
