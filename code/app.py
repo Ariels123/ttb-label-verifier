@@ -472,13 +472,20 @@ h2{font-size:16px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);m
 label{display:block;font-weight:700;font-size:16px;margin:16px 0 6px}
 input[type=text]{width:100%;font-size:19px;padding:12px 14px;border:3px solid var(--line);border-radius:10px}
 input[type=text]:focus{outline:none;border-color:var(--blue)}
-.drop{border:3px dashed var(--line);border-radius:16px;background:#fafbfd;min-height:280px;display:flex;flex-direction:column;cursor:pointer;padding:18px;color:var(--mut)}
+.drop{border:3px dashed var(--line);border-radius:16px;background:#fafbfd;min-height:280px;display:flex;flex-direction:column;cursor:pointer;padding:18px;color:var(--mut);position:relative}
 .drop:hover,.drop.over{border-color:var(--blue);background:#eef4fb}
 .dropmain{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px}
 .drop img{max-width:100%;max-height:230px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,.1)}
 .drop .big{font-size:60px;line-height:1}
 .dropcta{margin-top:12px;background:var(--blue);color:#fff;font-weight:800;font-size:18px;padding:13px;border-radius:12px;text-align:center}
 .drop:hover .dropcta,.drop.over .dropcta{filter:brightness(1.12)}
+.imgtools{display:none;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
+.imgtools.on{display:flex}
+.imgtool{font-size:14px;font-weight:700;padding:7px 13px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;color:var(--ink)}
+.imgtool:hover{background:var(--bg)}
+.imgtool.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.crophint{font-size:13px;color:var(--mut)}
+.cropsel{position:absolute;border:2px dashed var(--blue);background:rgba(26,79,138,.18);pointer-events:none;display:none;z-index:5}
 .go{margin-top:24px;width:100%;background:var(--blue);color:#fff;border:none;border-radius:14px;padding:20px;font-size:22px;font-weight:800;cursor:pointer;transition:transform 0.1s}
 .go:active{transform:scale(0.98)}
 .go:hover{filter:brightness(1.1)} .go:disabled{opacity:.5;cursor:default}
@@ -582,12 +589,19 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
   <div>
    <h2>Label Image</h2>
    <div class="drop" id="drop" role="button" tabindex="0" aria-label="Upload a label image"
-        onclick="document.getElementById('file').click()"
-        onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();document.getElementById('file').click();}">
+        onclick="dropClick()"
+        onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();dropClick();}">
      <div class="dropmain"><div class="big">&#128247;</div><div class="hint">Drag a clear photo of the label here, or</div></div>
      <div class="dropcta">&#128073; Click here to start</div>
    </div>
    <input type="file" id="file" accept="image/*" style="display:none">
+   <div class="imgtools" id="imgtools" title="Adjust the image before checking — helpful for angled or curved-bottle photos">
+     <button type="button" class="imgtool" onclick="rotateImg(-90)">&#8634; Rotate left</button>
+     <button type="button" class="imgtool" onclick="rotateImg(90)">Rotate right &#8635;</button>
+     <button type="button" class="imgtool" id="cropBtn" onclick="toggleCrop()">&#9986;&#65039; Crop</button>
+     <button type="button" class="imgtool" id="cropApply" onclick="applyCrop()" style="display:none">Apply crop</button>
+     <span class="crophint" id="cropHint"></span>
+   </div>
    <div class="examples">Try an example (fills the form &amp; runs it):
      <a href="#" onclick="loadExample('sample_correct.png');return false">&#10003; correct</a>
      <a href="#" onclick="loadExample('sample_bad_abv.png');return false">&#10007; wrong ABV</a>
@@ -717,7 +731,59 @@ const EXAMPLE_FIELDS={
 };
 $('file').addEventListener('change',e=>{singleFile=e.target.files[0];$('result').innerHTML='';preview();});
 ['dragover','dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.toggle('over',ev==='dragover');if(ev==='drop'){singleFile=e.dataTransfer.files[0];$('result').innerHTML='';preview();}}));
-function preview(){if(!singleFile)return;if($('goBtn'))$('goBtn').disabled=false;const u=URL.createObjectURL(singleFile);drop.innerHTML='<div class="dropmain"><img src="'+u+'"><div class="hint">'+esc(singleFile.name)+'</div></div><div class="dropcta">&#128260; Try another image</div>';}
+function preview(){if(!singleFile)return;if($('goBtn'))$('goBtn').disabled=false;const u=URL.createObjectURL(singleFile);drop.innerHTML='<div class="dropmain"><img src="'+u+'"><div class="hint">'+esc(singleFile.name)+'</div></div><div class="dropcta">&#128260; Try another image</div>';showImgTools(true);}
+
+// ---- Interactive crop / rotate: a human assist for angled or curved-bottle photos ----------
+// The edit is applied to the image BEFORE OCR (singleFile is replaced with the edited canvas),
+// so the agent can straighten a sideways shot or crop to the flat, readable part of a label.
+let cropMode=false,_cs=null,_cropRect=null;
+function dropClick(){ if(cropMode) return; document.getElementById('file').click(); }   // don't re-open the picker mid-crop
+function showImgTools(on){ const t=$('imgtools'); if(t)t.classList.toggle('on',!!on); if(!on&&cropMode)toggleCrop(); }
+function fileToImg(file){ return new Promise((res,rej)=>{const im=new Image();im.onload=()=>res(im);im.onerror=()=>rej(new Error('img'));im.src=URL.createObjectURL(file);}); }
+function canvasToFile(c,name){ return new Promise(res=>c.toBlob(b=>res(new File([b],name||'edited.png',{type:(b&&b.type)||'image/png'})),'image/png',0.95)); }
+async function rotateImg(deg){
+  if(!singleFile||cropMode) return;
+  const im=await fileToImg(singleFile), swap=Math.abs(deg)%180===90;
+  const c=document.createElement('canvas'); c.width=swap?im.naturalHeight:im.naturalWidth; c.height=swap?im.naturalWidth:im.naturalHeight;
+  const x=c.getContext('2d'); x.translate(c.width/2,c.height/2); x.rotate(deg*Math.PI/180); x.drawImage(im,-im.naturalWidth/2,-im.naturalHeight/2);
+  URL.revokeObjectURL(im.src);
+  singleFile=await canvasToFile(c,singleFile.name); $('result').innerHTML=''; preview();
+}
+function toggleCrop(){
+  cropMode=!cropMode;
+  $('cropBtn').classList.toggle('active',cropMode);
+  $('cropApply').style.display=cropMode?'':'none';
+  $('cropHint').textContent=cropMode?'Drag a box over the part to keep, then “Apply crop”.':'';
+  $('drop').style.cursor=cropMode?'crosshair':'';
+  if(!cropMode){const s=$('drop').querySelector('.cropsel');if(s)s.style.display='none';_cropRect=null;_cs=null;}
+}
+function _imgEl(){ return $('drop').querySelector('img'); }
+function _cropDown(e){ if(!cropMode||!_imgEl())return; e.preventDefault(); _cs={x:e.clientX,y:e.clientY}; }
+function _cropMove(e){
+  if(!cropMode||!_cs)return;
+  const drop=$('drop'),dr=drop.getBoundingClientRect(); let s=drop.querySelector('.cropsel');
+  if(!s){s=document.createElement('div');s.className='cropsel';drop.appendChild(s);}
+  const x0=Math.min(_cs.x,e.clientX),y0=Math.min(_cs.y,e.clientY),x1=Math.max(_cs.x,e.clientX),y1=Math.max(_cs.y,e.clientY);
+  s.style.display='block';s.style.left=(x0-dr.left)+'px';s.style.top=(y0-dr.top)+'px';s.style.width=(x1-x0)+'px';s.style.height=(y1-y0)+'px';
+  _cropRect={x0,y0,x1,y1};
+}
+function _cropUp(){ _cs=null; }
+async function applyCrop(){
+  if(!cropMode||!_cropRect||!singleFile)return;
+  const im=_imgEl(); if(!im)return; const ir=im.getBoundingClientRect();
+  const dx0=Math.max(_cropRect.x0,ir.left),dy0=Math.max(_cropRect.y0,ir.top),dx1=Math.min(_cropRect.x1,ir.right),dy1=Math.min(_cropRect.y1,ir.bottom);
+  if(dx1-dx0<8||dy1-dy0<8){$('cropHint').textContent='Selection too small — drag a larger box over the label.';return;}
+  const src=await fileToImg(singleFile), sx=src.naturalWidth/ir.width, sy=src.naturalHeight/ir.height;
+  const cw=(dx1-dx0)*sx, ch=(dy1-dy0)*sy;
+  const c=document.createElement('canvas'); c.width=Math.round(cw); c.height=Math.round(ch);
+  c.getContext('2d').drawImage(src,(dx0-ir.left)*sx,(dy0-ir.top)*sy,cw,ch,0,0,c.width,c.height);
+  URL.revokeObjectURL(src.src);
+  singleFile=await canvasToFile(c,singleFile.name);
+  toggleCrop(); $('result').innerHTML=''; preview();
+}
+$('drop').addEventListener('mousedown',_cropDown);
+document.addEventListener('mousemove',_cropMove);
+document.addEventListener('mouseup',_cropUp);
 async function loadExample(name){
   const f=EXAMPLE_FIELDS[name]||{};
   ['brand_name','class_type','alcohol_content','net_contents','producer','origin'].forEach(k=>{$(k).value=f[k]||'';});
@@ -924,7 +990,7 @@ function clearSingle(){
   if($('goBtn'))$('goBtn').disabled=true;
   ['brand_name','class_type','alcohol_content','net_contents','producer','origin'].forEach(k=>{if($(k))$(k).value='';});
   if($('file'))$('file').value='';
-  $('result').innerHTML='';hideProgress();
+  $('result').innerHTML='';hideProgress();showImgTools(false);
   drop.innerHTML='<div class="dropmain"><div class="big">&#128247;</div><div class="hint">Drag a clear photo of the label here, or</div></div><div class="dropcta">&#128073; Click here to start</div>';
 }
 
