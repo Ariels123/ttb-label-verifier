@@ -41,11 +41,13 @@ Run:  python app.py        ->  http://localhost:5050
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import logging.handlers
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -106,13 +108,32 @@ _ach.setFormatter(logging.Formatter("AUDIT %(message)s"))
 _audit_console.addHandler(_ach)
 
 _NO_AUDIT_PATHS = {"/health", "/favicon.ico"}            # infra noise — don't log
+_CTRL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize(s, n: int = 200) -> str:
+    """Make an untrusted value safe to put in a log line: strip control characters (newlines,
+    NULs, carriage returns) so a crafted filename/header can't FORGE or split audit entries,
+    and length-cap it. Audit-log integrity depends on this."""
+    return _CTRL_CHARS.sub("?", str(s if s is not None else ""))[:n]
 
 
 def _client_ip(req) -> str:
-    """Best-effort client IP: prefer X-Forwarded-For (if a reverse proxy is ever put in front),
-    else the direct peer address."""
-    xff = req.headers.get("X-Forwarded-For", "")
-    return (xff.split(",")[0].strip() if xff else "") or (req.remote_addr or "?")
+    """The PEER-CONFIRMED client IP (req.remote_addr) — the authoritative 'who' for the audit log.
+
+    We deliberately do NOT trust the X-Forwarded-For header here: this app is exposed directly
+    (no reverse proxy in front of the published port), so XFF is fully attacker-controlled and
+    honoring it would let anyone SPOOF their identity in the audit trail. The raw XFF, when
+    present, is recorded SEPARATELY as a non-authoritative "claimed" value (see _audit_after) so
+    operators can still see spoof attempts. If a trusted proxy is ever placed in front, switch to
+    werkzeug ProxyFix with a known proxy set rather than reading the header directly.
+    """
+    ip = _sanitize(req.remote_addr or "?", 64)
+    try:
+        ipaddress.ip_address(ip)                         # remote_addr should always parse; be defensive
+    except ValueError:
+        ip = "?"
+    return ip
 
 
 def _verdict(result: dict) -> str:
@@ -134,7 +155,7 @@ def _result_detail(result: dict) -> dict:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     return {
         "engine": result.get("engine", "server"),
-        "filename": result.get("filename"),
+        "filename": _sanitize(result.get("filename"), 200),   # upload filename is attacker-controlled
         "verdict": _verdict(result),
         "passed": result.get("passed"),
         "provided": result.get("provided"),
@@ -176,13 +197,18 @@ def _audit_after(resp):
             return resp
         env = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "ip": _client_ip(request),
-            "ua": (request.headers.get("User-Agent") or "")[:300],
-            "method": request.method,
-            "path": request.path,
+            "ip": _client_ip(request),                       # peer-confirmed, sanitized + validated
+            "ua": _sanitize(request.headers.get("User-Agent"), 300),
+            "method": _sanitize(request.method, 16),
+            "path": _sanitize(request.path, 300),
             "status": resp.status_code,
             "ms": int((time.time() - getattr(g, "_audit_t0", time.time())) * 1000),
         }
+        # If a (spoofable) X-Forwarded-For is present, record it as an explicitly NON-authoritative
+        # claimed value — never as `ip` — so a forged header is visible but can't rewrite the "who".
+        xff = request.headers.get("X-Forwarded-For")
+        if xff:
+            env["ip_claimed_xff"] = _sanitize(xff, 100)
         batch = getattr(g, "_audit_batch", None)
         detail = getattr(g, "_audit_detail", None)
         if batch is not None:                          # one small line per label (atomic, greppable)
