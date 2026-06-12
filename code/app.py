@@ -786,24 +786,47 @@ function loadPaddle(){
   })();
   return paddleLoad;
 }
+// Flatten one PP-OCR result into {lines:[text], words:[[word,conf]], confs:[]}.
+function flattenPaddle(res){
+  const lines=[],words=[],confs=[];
+  for(const line of (res.lines||[])) for(const seg of (line||[])){
+    const t=String(seg.text||'').trim(); if(!t) continue;
+    const cf=Math.round((seg.confidence||0)*100); confs.push(cf); lines.push(t);
+    for(const wd of t.split(/\s+/)) if(wd) words.push([wd,cf]);
+  }
+  return {lines,words,confs};
+}
+function pack(f){f.confs.sort((a,b)=>a-b);return {text:f.lines.join('\n'),words:f.words,meanConf:f.confs.length?f.confs[Math.floor(f.confs.length/2)]:0};}
 async function paddleOcr(file,onProg){
   const svc=await loadPaddle();
-  if(onProg)onProg(55);
+  if(onProg)onProg(35);
   const img=new Image(); img.src=URL.createObjectURL(file);
   await new Promise((r,e)=>{img.onload=r;img.onerror=()=>e(new Error('decode failed'));});
-  let w=img.width,h=img.height; const MAX=2000;            // downscale big photos: fast + GPU-safe
-  if(Math.max(w,h)>MAX){const s=MAX/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}
-  const cv=document.createElement('canvas');cv.width=w;cv.height=h;
-  cv.getContext('2d').drawImage(img,0,0,w,h); URL.revokeObjectURL(img.src);
-  const res=await svc.recognize(cv);
-  if(onProg)onProg(100);
-  const words=[],confs=[];                                 // flatten PP-OCR lines -> [word, conf 0-100]
-  for(const line of (res.lines||[])) for(const seg of (line||[])){
-    const cf=Math.round((seg.confidence||0)*100); confs.push(cf);
-    for(const wd of String(seg.text||'').split(/\s+/)) if(wd) words.push([wd,cf]);
-  }
-  confs.sort((a,b)=>a-b);
-  return {text:res.text||'', words, meanConf:confs.length?confs[Math.floor(confs.length/2)]:0};
+  try{
+    const W=img.width,H=img.height;
+    const drawCanvas=(sx,sy,sw,sh,scale)=>{const c=document.createElement('canvas');c.width=Math.round(sw*scale);c.height=Math.round(sh*scale);c.getContext('2d').drawImage(img,sx,sy,sw,sh,0,0,c.width,c.height);return c;};
+    const MAX=2000, dscale=Math.max(W,H)>MAX?MAX/Math.max(W,H):1;      // downscale big photos: fast + GPU-safe
+    let best=flattenPaddle(await svc.recognize(drawCanvas(0,0,W,H,dscale)));   // whole image (fast path)
+    if(onProg)onProg(70);
+    // ESCALATE: a poor whole-image read usually means a curved/angled label whose text baselines
+    // bend across the frame. Re-OCR in narrow VERTICAL STRIPS — the curve is ~flat over a small
+    // horizontal span — and union the fragments. Recovers fields (ABV, net contents, …) the whole
+    // image misses. Only runs on hard images, so easy labels stay fast.
+    if(wordCount(best.lines.join(' '))<12){
+      const N=3, overlap=0.12, seen=new Set(), merged={lines:[],words:[],confs:[]};
+      best.lines.forEach(t=>{const k=t.toLowerCase().replace(/[^a-z0-9]/g,'');if(k)seen.add(k);});
+      for(let i=0;i<N;i++){
+        const x0=Math.max(0,(i/N-overlap))*W, x1=Math.min(1,((i+1)/N+overlap))*W, sw0=x1-x0;
+        const r=flattenPaddle(await svc.recognize(drawCanvas(x0,0,sw0,H,Math.min(3,1400/sw0))));
+        r.confs.forEach(c=>merged.confs.push(c)); r.words.forEach(wd=>merged.words.push(wd));
+        for(const t of r.lines){const k=t.toLowerCase().replace(/[^a-z0-9]/g,'');if(k&&!seen.has(k)){seen.add(k);merged.lines.push(t);}}
+        if(onProg)onProg(70+Math.round((i+1)/N*28));
+      }
+      if(wordCount(merged.lines.join(' '))>wordCount(best.lines.join(' '))) best=merged;  // use strips if they recovered more
+    }
+    if(onProg)onProg(100);
+    return pack(best);
+  } finally { URL.revokeObjectURL(img.src); }
 }
 // Best in-browser OCR: try the deep PP-OCR model first; if it can't load/run or reads too
 // little, fall back to Tesseract.js. Both stay entirely on the user's machine.
