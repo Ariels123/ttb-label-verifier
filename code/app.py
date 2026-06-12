@@ -475,7 +475,7 @@ input[type=text]:focus{outline:none;border-color:var(--blue)}
 .drop{border:3px dashed var(--line);border-radius:16px;background:#fafbfd;min-height:280px;display:flex;flex-direction:column;cursor:pointer;padding:18px;color:var(--mut);position:relative}
 .drop:hover,.drop.over{border-color:var(--blue);background:#eef4fb}
 .dropmain{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px}
-.drop img{max-width:100%;max-height:230px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,.1)}
+.drop img{max-width:100%;max-height:230px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,.1);user-select:none;-webkit-user-drag:none;-webkit-user-select:none}
 .drop .big{font-size:60px;line-height:1}
 .dropcta{margin-top:12px;background:var(--blue);color:#fff;font-weight:800;font-size:18px;padding:13px;border-radius:12px;text-align:center}
 .drop:hover .dropcta,.drop.over .dropcta{filter:brightness(1.12)}
@@ -735,7 +735,7 @@ const EXAMPLE_FIELDS={
 };
 $('file').addEventListener('change',e=>{singleFile=e.target.files[0];$('result').innerHTML='';preview();});
 ['dragover','dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.toggle('over',ev==='dragover');if(ev==='drop'){singleFile=e.dataTransfer.files[0];$('result').innerHTML='';preview();}}));
-function preview(){if(!singleFile)return;if($('goBtn'))$('goBtn').disabled=false;const u=URL.createObjectURL(singleFile);drop.innerHTML='<div class="dropmain"><img src="'+u+'"><div class="hint">'+esc(singleFile.name)+'</div></div><div class="dropcta">&#128260; Try another image</div>';showImgTools(true);}
+function preview(){if(!singleFile)return;if($('goBtn'))$('goBtn').disabled=false;const u=URL.createObjectURL(singleFile);drop.innerHTML='<div class="dropmain"><img draggable="false" src="'+u+'"><div class="hint">'+esc(singleFile.name)+'</div></div><div class="dropcta">&#128260; Try another image</div>';showImgTools(true);}
 
 // ---- Interactive crop / rotate: a human assist for angled or curved-bottle photos ----------
 // The edit is applied to the image BEFORE OCR (singleFile is replaced with the edited canvas),
@@ -796,6 +796,7 @@ async function applyCrop(){
   toggleCrop(); $('result').innerHTML=''; preview();
 }
 $('drop').addEventListener('mousedown',_cropDown);
+$('drop').addEventListener('dragstart',e=>e.preventDefault());   // never let a real drag grab the image ghost (would hijack crop)
 document.addEventListener('mousemove',_cropMove);
 document.addEventListener('mouseup',_cropUp);
 async function loadExample(name){
