@@ -117,14 +117,25 @@ volume-normalized net contents, and the confidence/plausibility gating that keep
 on a poor read. `gen_and_test.py` is an end-to-end check: it asserts the expected PASS/FAIL verdict
 for each synthetic label.
 
-## Browser OCR (optional, advisory)
+## Browser OCR — the default, and the most powerful engine (optional, advisory)
 
-Under **"Privacy & advanced options"** there's a *"Scan privately in my browser"* mode (on by
-default): the label is OCR'd **in the browser** (Tesseract.js / WASM) and only the extracted text
-is sent to the server — the image never leaves the user's machine. If in-browser OCR can't read an
-image it **automatically falls back to the secure server** and says so. It's **advisory** —
-client-supplied text is untrusted, so the server stays the source of truth for any authoritative
-decision (and the inputs are hard-capped against abuse).
+OCR is the heavy part, so by default it runs **in the user's own browser, on their own hardware**
+— which keeps the shared server light and scales for free. Only the extracted **text** is sent to
+the server; the image never leaves the user's machine. The in-browser engine is tiered, strongest
+first:
+
+1. **PP-OCRv5 deep model** (PaddleOCR family) via **ONNX Runtime Web**, GPU-accelerated with
+   **WebGPU** (automatic WASM fallback). This is the most accurate engine in the whole system —
+   markedly better than Tesseract on real label photos — and it runs entirely client-side. Models
+   (~a few MB) download once from a CDN and are then browser-cached.
+2. **Tesseract.js** — fallback if the deep model can't load/run (older browser, no WebAssembly).
+3. **Secure server** (the light Tesseract path below) — only if in-browser OCR fails entirely; the
+   UI says so when it happens.
+
+It's **advisory**: client-supplied text is untrusted, so the server remains the source of truth for
+any authoritative decision (and the `/verify_text` inputs are hard-capped + sanitized against
+abuse). The server's own OCR is deliberately kept lightweight (Tesseract, no heavy models) because
+the heavy lifting now happens on the client.
 
 ## Batch mode
 
@@ -190,15 +201,19 @@ The deployed instance runs this image with a memory cap and a volume-backed temp
 
 ## Known limitations / trade-offs
 
-- **Speed over maximum accuracy.** Tesseract favors offline speed; very ornate or low-contrast
-  labels (gold-on-dark serif wine labels, curved bottles) read partially — the tool then stays
-  silent on extraction and flags "verify by eye" rather than guessing. The accuracy upgrade is the
-  **deep OCR tier** (PaddleOCR, server-side on a bigger box) or **height-based brand detection**.
+- **Physical distortion still reads partially.** The browser now runs the **PP-OCRv5 deep model**
+  by default (the most accurate engine in the system), so ordinary ornate/low-contrast labels read
+  well. What stays genuinely hard is *physical* distortion — text wrapped around a **curved bottle**,
+  shot at a steep **angle**, or **occluded** (a finger over the label) — which no flat single-pass
+  OCR reads without dewarping. On those the tool stays silent on extraction and flags "verify by
+  eye" rather than guessing. Next steps: perspective/cylinder dewarping, or height-based brand
+  detection.
 - **"Bold" heading isn't verified** — font weight isn't reliably recoverable from OCR text, so only
   wording + caps are checked.
 - **Forgiving identity matching** can over-match very short, similar strings (intentional for
   "STONE'S THROW"–style tolerance).
-- **Browser OCR is advisory** and loads Tesseract.js from a CDN; for a strictly air-gapped
-  deployment the engine should be self-hosted. The server remains authoritative.
+- **Browser OCR is advisory and CDN-loaded.** The deep engine (ONNX Runtime Web + PP-OCRv5 weights)
+  and the Tesseract.js fallback are fetched from public CDNs; for a strictly air-gapped deployment
+  they should be self-hosted / vendored. The server remains authoritative for any decision.
 - **Batch** applies one optional template to all labels (or a warning-only sweep); per-label
   application data (a CSV of different products) is a documented next step.

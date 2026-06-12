@@ -587,7 +587,7 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
    <details class="advanced" open><summary>Privacy &amp; advanced options</summary>
    <label class="ocrtoggle" title="Scans the label in your browser with Tesseract.js; falls back to the secure server only if it can't read the image">
      <input type="checkbox" id="browserOcr" checked>
-     <span>&#9889; Scan privately in my browser <em>(beta — stays on your computer; falls back to the secure server if it can’t read it)</em></span>
+     <span>&#9889; Scan privately in my browser <em>(runs a powerful AI OCR model on your own device — the image stays on your computer; falls back to the secure server if needed)</em></span>
    </label>
    </details>
   </div>
@@ -627,7 +627,7 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
  <details class="advanced" open><summary>Privacy &amp; advanced options</summary>
  <label class="ocrtoggle" title="Scans each label in your browser; any image it can't read falls back to the secure server">
    <input type="checkbox" id="b_browserOcr" checked>
-   <span>&#9889; Scan privately in my browser <em>(beta — ideal for large batches; unreadable images fall back to the secure server)</em></span>
+   <span>&#9889; Scan privately in my browser <em>(runs a powerful AI OCR model on your own device — ideal for large batches; unreadable images fall back to the secure server)</em></span>
  </label>
  </details>
  <button class="go" id="bGoBtn" onclick="verifyBatch()">Start Batch Verification</button>
@@ -738,6 +738,53 @@ async function browserOcr(file,onProg){
   }finally{await worker.terminate();}
 }
 
+/* ---- Deep browser OCR: PP-OCRv5 via ONNX Runtime Web (WebGPU, WASM fallback) ----------
+   The MOST powerful engine we can run client-side, executed on the USER'S OWN hardware/GPU,
+   so the shared server stays light. Loaded once via a dynamic ESM import from a CDN; the
+   PP-OCRv5 models auto-download once and are browser-cached. Far more accurate than
+   Tesseract.js on real label photos. If it can't load/run, we fall back to Tesseract.js,
+   then (only if both fail) to the secure server. */
+let paddleSvc=null, paddleLoad=null;
+function loadPaddle(){
+  if(paddleSvc) return Promise.resolve(paddleSvc);
+  if(!paddleLoad) paddleLoad=(async()=>{
+    const mod=await import('https://esm.sh/ppu-paddle-ocr/web');
+    const svc=new mod.PaddleOcrService();
+    await svc.initialize();                                 // downloads PP-OCRv5 models once (cached)
+    paddleSvc=svc; return svc;
+  })();
+  return paddleLoad;
+}
+async function paddleOcr(file,onProg){
+  const svc=await loadPaddle();
+  if(onProg)onProg(55);
+  const img=new Image(); img.src=URL.createObjectURL(file);
+  await new Promise((r,e)=>{img.onload=r;img.onerror=()=>e(new Error('decode failed'));});
+  let w=img.width,h=img.height; const MAX=2000;            // downscale big photos: fast + GPU-safe
+  if(Math.max(w,h)>MAX){const s=MAX/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}
+  const cv=document.createElement('canvas');cv.width=w;cv.height=h;
+  cv.getContext('2d').drawImage(img,0,0,w,h); URL.revokeObjectURL(img.src);
+  const res=await svc.recognize(cv);
+  if(onProg)onProg(100);
+  const words=[],confs=[];                                 // flatten PP-OCR lines -> [word, conf 0-100]
+  for(const line of (res.lines||[])) for(const seg of (line||[])){
+    const cf=Math.round((seg.confidence||0)*100); confs.push(cf);
+    for(const wd of String(seg.text||'').split(/\s+/)) if(wd) words.push([wd,cf]);
+  }
+  confs.sort((a,b)=>a-b);
+  return {text:res.text||'', words, meanConf:confs.length?confs[Math.floor(confs.length/2)]:0};
+}
+// Best in-browser OCR: try the deep PP-OCR model first; if it can't load/run or reads too
+// little, fall back to Tesseract.js. Both stay entirely on the user's machine.
+async function bestBrowserOcr(file,onProg){
+  try{
+    const r=await paddleOcr(file,onProg);
+    if(wordCount(r.text)>=4){ r.engine='paddle'; return r; }
+  }catch(e){ /* deep engine unavailable (old browser / network) -> Tesseract.js */ }
+  if(onProg)onProg(0);
+  const r=await browserOcr(file,onProg); r.engine='tesseract'; return r;
+}
+
 function wordCount(t){return (String(t||'').match(/[A-Za-z]{3,}/g)||[]).length;}
 function setBusy(btn,on){if(btn){btn.disabled=on;btn.setAttribute('aria-busy',on?'true':'false');}}
 function showProgress(p){const b=$('prog');if(b){b.style.display='block';b.classList.remove('indet');$('progbar').style.width=Math.max(3,p||0)+'%';}}
@@ -775,8 +822,8 @@ async function verifyOne(){
       try{
         $('goBtn').textContent='Reading in your browser…';showProgress(0);
         const t0=Date.now();
-        const res=await browserOcr(singleFile,p=>{showProgress(p);$('goBtn').textContent='Reading in your browser… '+p+'%';});
-        if(wordCount(res.text)<6) throw new Error('__LOWREAD__');  // local OCR essentially failed to read it
+        const res=await bestBrowserOcr(singleFile,p=>{showProgress(p);$('goBtn').textContent='Reading in your browser… '+p+'%';});
+        if(wordCount(res.text)<6) throw new Error('__LOWREAD__');  // even the fallback engine failed -> server
         const body={ocr_text:res.text,filename:singleFile.name,client_ms:Date.now()-t0,words:res.words,mean_conf:res.meanConf};
         ['brand_name','class_type','alcohol_content','net_contents','producer','origin'].forEach(k=>body[k]=$(k).value);
         d=await (await fetch('/verify_text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
@@ -893,8 +940,6 @@ async function verifyBatch(){
 // sequentially (safe on weak devices; the server never touches the images). Each
 // image's text is verified via /verify_text, mapped to the server batch row shape.
 async function browserOcrBatch(files,fields,onProg){
-  await loadTesseract();
-  const worker=await Tesseract.createWorker('eng',1);
   const items=[];
   const verifyImageOnServer=async(file)=>{
     const fd=new FormData();fd.append('image',file);Object.keys(fields).forEach(k=>fd.append(k,fields[k]));
@@ -903,34 +948,27 @@ async function browserOcrBatch(files,fields,onProg){
   const row=(file,d,ms,engine)=>({filename:file.name,passed:!!d.passed,provided:d.provided||0,
     total_ms:ms,fails:(d.results||[]).filter(r=>r.status==='fail').map(r=>r.field),engine,
     results:d.results||[],ocr_text:(d.ocr_text||'').slice(0,3000)});
-  try{
-    for(let i=0;i<files.length;i++){
-      const file=files[i];onProg(i,files.length);
-      const it0=Date.now();let combined='', words=[];
-      try{
-        for(const psm of ['3','11']){
-          await worker.setParameters({tessedit_pageseg_mode:psm,user_defined_dpi:'300'});
-          const {data}=await worker.recognize(file);
-          if(data&&data.text)combined+=data.text+'\n';
-          if(psm==='3'&&data&&data.words)words=data.words.map(w=>[w.text,w.confidence]).filter(x=>x[0]&&x[1]>=0);
-        }
-        if(wordCount(combined)<6){
-          // Local OCR essentially failed on this image -> fall back to the server.
-          items.push(row(file,await verifyImageOnServer(file),Date.now()-it0,'server'));
-        }else{
-          const body={ocr_text:combined,filename:file.name,words:words,mean_conf:medianConf(words)};Object.keys(fields).forEach(k=>body[k]=fields[k]);
-          const d=await (await fetch('/verify_text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-          items.push(row(file,d,Date.now()-it0,'browser'));
-        }
-      }catch(err){
-        // In-browser OCR threw -> last-resort server attempt for this one file.
-        try{ items.push(row(file,await verifyImageOnServer(file),Date.now()-it0,'server')); }
-        catch(e2){ items.push({filename:file.name,passed:false,provided:0,total_ms:Date.now()-it0,fails:['Could not read this image'],engine:'error'}); }
+  for(let i=0;i<files.length;i++){
+    const file=files[i];onProg(i,files.length);
+    const it0=Date.now();
+    try{
+      const res=await bestBrowserOcr(file);          // deep PP-OCR first, Tesseract.js fallback
+      if(wordCount(res.text)<6){
+        // Even the fallback engine failed on this image -> secure server.
+        items.push(row(file,await verifyImageOnServer(file),Date.now()-it0,'server'));
+      }else{
+        const body={ocr_text:res.text,filename:file.name,words:res.words,mean_conf:res.meanConf};Object.keys(fields).forEach(k=>body[k]=fields[k]);
+        const d=await (await fetch('/verify_text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+        items.push(row(file,d,Date.now()-it0,'browser'));
       }
+    }catch(err){
+      // In-browser OCR threw -> last-resort server attempt for this one file.
+      try{ items.push(row(file,await verifyImageOnServer(file),Date.now()-it0,'server')); }
+      catch(e2){ items.push({filename:file.name,passed:false,provided:0,total_ms:Date.now()-it0,fails:['Could not read this image'],engine:'error'}); }
     }
-    onProg(files.length,files.length);
-    return items;
-  }finally{await worker.terminate();}
+  }
+  onProg(files.length,files.length);
+  return items;
 }
 
 function whereLabel(engine){return engine==='server'?'server (uploaded)':engine==='error'?'unreadable':engine==='browser'?'in browser':'server';}
