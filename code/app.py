@@ -251,7 +251,7 @@ def _verify_upload(fileobj, fields: dict) -> dict:
     Returns:
         the verifier result dict, plus total_ms / ocr_text / filename.
     """
-    filename = getattr(fileobj, 'filename', 'image.png')
+    filename = _sanitize(getattr(fileobj, 'filename', 'image.png'), 200)   # strip control chars at ingest
     suffix = _safe_suffix(filename)
 
     fd, path = tempfile.mkstemp(suffix=suffix)
@@ -360,7 +360,7 @@ def verify_text():
     result = verifier.verify(fields, text, words, mean_conf)
     result["ocr_text"] = text.strip()
     result["total_ms"] = client_ms
-    result["filename"] = str(data.get("filename") or "browser-ocr")[:200]
+    result["filename"] = _sanitize(data.get("filename") or "browser-ocr", 200)   # strip control chars at ingest
     result["engine"] = "browser"
     result["advisory"] = True  # client-supplied text — applicant pre-flight, not a reviewer-grade decision
     g._audit_detail = _result_detail(result)   # audit log captures the full per-field result
@@ -403,7 +403,7 @@ def verify_batch():
         except Exception:
             size = 0
         if size > MAX_FILE_BYTES:
-            temp_files.append((None, f.filename, "File too large (>15 MB) — skipped"))
+            temp_files.append((None, _sanitize(f.filename, 200), "File too large (>15 MB) — skipped"))
             continue
         total += size
         if total > MAX_BATCH_BYTES:
@@ -414,7 +414,7 @@ def verify_batch():
         fd, path = tempfile.mkstemp(suffix=_safe_suffix(f.filename))
         with os.fdopen(fd, 'wb') as tmp:
             f.save(tmp)
-        temp_files.append((path, f.filename, None))
+        temp_files.append((path, _sanitize(f.filename, 200), None))
 
     items = []
     try:
