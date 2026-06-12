@@ -126,6 +126,25 @@ def test_extraction_brand_skips_warning_lines():
     assert v._extract_detected("brand_name", "SMOKING AND ALCOHOL CONSUMPTION IS INJURIOUS\nAcme Distillery", mean_conf=90) == "Acme Distillery"
 
 
+def test_extraction_recovers_dropped_decimal_abv():
+    # OCR sometimes drops the decimal: "13.5% vol" reads as "135% vol". Restore to 13.5%,
+    # and never surface a partial "35%".
+    assert v._extract_detected("alcohol_content", "135% vol", mean_conf=90) == "13.5%"
+    assert v._extract_detected("alcohol_content", "alc 135%", mean_conf=90) == "13.5%"
+
+
+def test_extraction_keeps_round_hundred_as_content_not_abv():
+    # "100% agave" is a content claim, not a dropped-decimal ABV -> ignore it, use the real 40%.
+    assert v._extract_detected("alcohol_content", "100% agave 40% alc/vol", mean_conf=90) == "40%"
+
+
+def test_abv_check_tolerates_dropped_decimal():
+    # application says 13.5; label OCR'd as "135% vol" (decimal dropped) still PASSes...
+    assert v.check_abv("13.5", "135% vol")[0] == v.PASS
+    # ...but a genuine mismatch still FAILs.
+    assert v.check_abv("13.5", "145% vol")[0] == v.FAIL
+
+
 if __name__ == "__main__":
     tests = [g for n, g in sorted(globals().items()) if n.startswith("test_")]
     passed = 0

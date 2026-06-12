@@ -221,7 +221,14 @@ def check_abv(expected: str, ocr: str, tol: float = 0.1) -> tuple[str, str, str 
     cands = []  # [(abv_value, raw_label_text), ...] — every alcohol figure found on the label
     # Explicit percentages: "45%", "13.5 %".
     for m in re.finditer(r"(\d{1,3}(?:\.\d+)?)\s*%", clean_ocr):
-        cands.append((float(m.group(1)), m.group(0)))
+        v = float(m.group(1))
+        cands.append((v, m.group(0)))
+        # OCR sometimes drops the decimal point ("13.5%" read as "135%"). A literal ABV >= 100
+        # is physically impossible, so when we see one that ISN'T a round hundred (those are
+        # usually content claims like "100% agave"), also offer the decimal-restored reading
+        # (135 -> 13.5) as a candidate. Harmless: it only matches if the application entered it.
+        if v > 100 and v % 100 != 0:
+            cands.append((v / 10.0, m.group(0)))
     # Proof readings, converted to ABV (proof / 2): "90 Proof" -> 45.
     for m in re.finditer(r"(\d{1,3}(?:\.\d+)?)\s*proof", clean_ocr.lower()):
         cands.append((float(m.group(1))/2.0, m.group(0)))
@@ -498,9 +505,13 @@ def _extract_detected(key, ocr_text, words=None, mean_conf=None):
         return None                                       # read too poor to extract anything reliably
 
     if key == "alcohol_content":
-        for m in re.finditer(r"(\d{1,2}(?:\.\d+)?)\s*%", _normalize_numbers(low)):
-            if 4.0 <= float(m.group(1)) <= 70.0:          # plausible ABV (not 100% grape, not a 2% misread)
-                return m.group(0).strip()
+        # (?<!\d) so a 3-digit reading like "135%" is NOT misread as a partial "35%".
+        for m in re.finditer(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%", _normalize_numbers(low)):
+            v = float(m.group(1))
+            if v > 100 and v % 100 != 0:                  # OCR dropped a decimal: 135% -> 13.5%
+                v = v / 10.0
+            if 4.0 <= v <= 70.0:                          # plausible ABV (not 100% grape, not a 2% misread)
+                return f"{v:g}%"
         m = re.search(r"(\d{2,3})\s*proof", low)
         return m.group(0).strip() if (m and 40 <= int(m.group(1)) <= 200) else None
     if key == "net_contents":
