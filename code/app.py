@@ -600,12 +600,12 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
      <div class="englabel">&#9889; OCR engine <em style="font-weight:400;color:var(--mut)">— runs on your device unless noted; the image never leaves your computer for the browser engines</em></div>
      <label class="engopt"><input type="radio" name="engine" value="paddle" checked onchange="engineChanged('')">
        <span class="engname">PaddleOCR (PP-OCRv5)<span class="engflag" tabindex="0" role="note" aria-label="Foreign software warning"><span aria-hidden="true">&#9888; Baidu &middot; China</span><span class="engtip">&#9888;&#65039; <b>PaddleOCR is developed by Baidu, a company based in China.</b> Selecting it runs Baidu&rsquo;s OCR models inside your browser. Your label image stays on your device, but the OCR software itself originates from China &mdash; review your organization&rsquo;s policy on foreign-developed software before using this option in a government environment.</span></span></span>
-       <span class="engdesc">Most accurate. Deep-learning OCR running on your device&rsquo;s GPU; the image stays on your computer. Falls back to the secure server if it can&rsquo;t read an image.</span></label>
+       <span class="engdesc">Most accurate. Deep-learning OCR running on your device&rsquo;s GPU; the image stays on your computer. Falls back to the server if it can&rsquo;t read an image.</span></label>
      <label class="engopt"><input type="radio" name="engine" value="tesseract" onchange="engineChanged('')">
        <span class="engname">Tesseract<span class="engok">open-source</span></span>
        <span class="engdesc">Fully open-source (Apache 2.0). Lighter but less accurate on photos; runs on your device, image stays local.</span></label>
      <label class="engopt"><input type="radio" name="engine" value="server" onchange="engineChanged('')">
-       <span class="engname">Secure server</span>
+       <span class="engname">Server</span>
        <span class="engdesc">Uploads the image and runs OCR on the TTB server &mdash; no in-browser engine. Use if your policy disallows in-browser AI models.</span></label>
    </div>
    </details>
@@ -653,7 +653,7 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
      <span class="engname">Tesseract<span class="engok">open-source</span></span>
      <span class="engdesc">Fully open-source (Apache 2.0). Lighter, less accurate; runs on your device.</span></label>
    <label class="engopt"><input type="radio" name="b_engine" value="server" onchange="engineChanged('b_')">
-     <span class="engname">Secure server</span>
+     <span class="engname">Server</span>
      <span class="engdesc">Uploads each image and runs OCR on the TTB server &mdash; no in-browser engine.</span></label>
  </div>
  </details>
@@ -695,7 +695,7 @@ const CAP={fetch:typeof window.fetch==='function',
   if(missing.length){const w=$('capWarn');if(w){w.style.display='';
     w.textContent='Your browser is missing: '+missing.join(', ')+'. Please update to a current browser (Chrome, Edge, Firefox, or Safari) to use this tool.';}}
   // In-browser engines (PaddleOCR / Tesseract.js) need Web Workers + WebAssembly. If absent,
-  // disable them and force the "Secure server" engine.
+  // disable them and force the "Server" engine.
   if(!CAP.worker || typeof WebAssembly!=='object'){
     ['engine','b_engine'].forEach(grp=>document.querySelectorAll('input[name="'+grp+'"]').forEach(r=>{
       if(r.value==='server'){r.checked=true;} else {r.disabled=true; const o=r.closest('.engopt'); if(o)o.style.opacity='.5';}
@@ -733,7 +733,7 @@ async function loadExample(name){
    Tesseract.js (WASM) reads the label on the USER'S OWN machine; only the extracted text
    is posted to /verify_text — the image never leaves the device. The engine is lazy-loaded
    from a CDN on first use (so the page itself stays light), and the caller falls back to
-   the secure server if loading or reading fails. */
+   the server if loading or reading fails. */
 let tessReady=false;
 function loadTesseract(){
   return new Promise((resolve,reject)=>{
@@ -774,7 +774,7 @@ async function browserOcr(file,onProg){
    so the shared server stays light. Loaded once via a dynamic ESM import from a CDN; the
    PP-OCRv5 models auto-download once and are browser-cached. Far more accurate than
    Tesseract.js on real label photos. If it can't load/run, we fall back to Tesseract.js,
-   then (only if both fail) to the secure server. */
+   then (only if both fail) to the server. */
 let paddleSvc=null, paddleLoad=null;
 function loadPaddle(){
   if(paddleSvc) return Promise.resolve(paddleSvc);
@@ -824,7 +824,7 @@ function engineChanged(p){
   const w=$(p+'engWarn'); if(!w) return;
   if(selectedEngine(p)==='paddle'){
     w.style.display='block';
-    w.innerHTML='&#9888;&#65039; <b>PaddleOCR is developed by Baidu, a company based in China.</b> Selecting it runs Baidu&rsquo;s OCR models inside your browser. Your label image stays on your device &mdash; but the OCR software itself originates from China. Review your organization&rsquo;s policy on foreign-developed software before using this option in a government environment. The open-source <b>Tesseract</b> and <b>Secure server</b> options avoid this.';
+    w.innerHTML='&#9888;&#65039; <b>PaddleOCR is developed by Baidu, a company based in China.</b> Selecting it runs Baidu&rsquo;s OCR models inside your browser. Your label image stays on your device &mdash; but the OCR software itself originates from China. Review your organization&rsquo;s policy on foreign-developed software before using this option in a government environment. The open-source <b>Tesseract</b> and <b>Server</b> options avoid this.';
   } else { w.style.display='none'; w.innerHTML=''; }
 }
 // Run one in-browser engine by name. 'paddle' = deep PP-OCR (with a Tesseract.js safety net);
@@ -844,7 +844,7 @@ function hideProgress(){const b=$('prog');if(b){b.style.display='none';b.classLi
 function showWorking(el,msg){el.innerHTML='<div class="working"><span id="wtxt">&#9203; '+esc(msg)+'</span><div class="workbar"><div id="wbar"></div></div></div>';el.scrollIntoView({behavior:'smooth',block:'start'});}
 function updateWorking(done,total){const t=$('wtxt'),b=$('wbar');if(t)t.innerHTML='&#9203; Read '+done+' of '+total+' labels…';if(b){b.style.animation='none';b.style.width=Math.round(done/Math.max(1,total)*100)+'%';}}
 function fallbackNote(reason){
-  return '<div class="fallback">&#9888; In-browser scanning '+esc(reason)+', so we used secure <b>server processing</b> instead — your image was uploaded to complete this check.</div>';
+  return '<div class="fallback">&#9888; In-browser scanning '+esc(reason)+', so we used <b>server processing</b> instead — your image was uploaded to complete this check.</div>';
 }
 async function serverVerifyImage(file){
   const fd=new FormData();fd.append('image',file);
@@ -878,9 +878,9 @@ async function verifyOne(){
         ['brand_name','class_type','alcohol_content','net_contents','producer','origin'].forEach(k=>body[k]=$(k).value);
         d=await (await fetch('/verify_text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
       }catch(err){
-        // In-browser OCR had a problem -> fall back to the secure server, and tell the user.
+        // In-browser OCR had a problem -> fall back to the server, and tell the user.
         fellBack=(err&&err.message==='__LOWREAD__')?'could not read this image clearly':'could not run on this device';
-        $('goBtn').textContent='Using secure server…';hideProgress();
+        $('goBtn').textContent='Using server…';hideProgress();
         d=await serverVerifyImage(singleFile);
       }
     }else{
@@ -938,7 +938,8 @@ function renderResult(d){
   const skipN=d.results.filter(x=>x.status==='skip').length;
   const provided=d.provided||0;
   let cls,icon,big,sub;
-  if(d.unreadable){cls='warn';icon='&#128247;';big='COULDN’T READ';sub='We couldn’t read this label clearly. Please upload a sharper, straight-on photo of the brand and warning area.';}
+  const poorRead=d.unreadable||(typeof d.mean_conf==='number'&&d.mean_conf<40);  // very low OCR confidence = garbage read
+  if(poorRead){cls='warn';icon='&#128247;';big='COULDN’T READ';sub='We couldn’t read this label clearly — the text came back too low-confidence to trust. If this is a photo of a <b>curved or angled bottle</b>, OCR can’t reliably read text that wraps around the glass. Please submit the <b>flat label image</b> (as used in a COLA application) or a straight-on, flattened photo of the label.';}
   else if(anyFail){cls='fail';icon='&#10060;';big='FAIL';sub='This label needs review — see the mismatches below.';}
   else if(anyLow){cls='warn';icon='&#128064;';big='NEEDS A LOOK';sub='Some fields couldn’t be read confidently — please verify the ones marked “check by eye”.';}
   else if(provided===0){cls='pass';icon='&#10024;';big='EXTRACTED';sub='No application details entered, so we extracted what we could from the label.';}
@@ -1005,7 +1006,7 @@ async function browserOcrBatch(files,fields,engine,onProg){
     try{
       const res=await runEngine(engine,file);        // chosen engine (paddle deep / tesseract)
       if(wordCount(res.text)<6){
-        // Even the fallback engine failed on this image -> secure server.
+        // Even the fallback engine failed on this image -> server.
         items.push(row(file,await verifyImageOnServer(file),Date.now()-it0,'server'));
       }else{
         const body={ocr_text:res.text,filename:file.name,words:res.words,mean_conf:res.meanConf};Object.keys(fields).forEach(k=>body[k]=fields[k]);
@@ -1036,7 +1037,7 @@ function renderBatch(items,elapsed,useBrowser){
   let h='<div class="banner '+cls+'"><span class="dot">'+icon+'</span><span class="bmsg"><span class="bigword">'+big+'</span><span class="subline">'+sub+'</span></span><span class="timing">Total time: '+elapsed+'s</span></div>';
   if(useBrowser){
     if(sentToServer===0)h+='<div class="privacy">&#128274; OCR ran entirely in your browser — the images were never uploaded.</div>';
-    else h+='<div class="fallback">&#9888; '+sentToServer+' of '+items.length+' image'+(items.length>1?'s':'')+' couldn’t be read in your browser, so '+(sentToServer>1?'they were':'it was')+' sent to the secure <b>server</b> to finish. The rest stayed on your computer.</div>';
+    else h+='<div class="fallback">&#9888; '+sentToServer+' of '+items.length+' image'+(items.length>1?'s':'')+' couldn’t be read in your browser, so '+(sentToServer>1?'they were':'it was')+' sent to the <b>server</b> to finish. The rest stayed on your computer.</div>';
   }
   if(fail>0)h+='<label class="filter"><input type="checkbox" onchange="document.getElementById(\'bwrap\').classList.toggle(\'failonly\',this.checked)"> Show only the '+fail+' label'+(fail>1?'s':'')+' that need review</label>';
   h+='<div id="bwrap"><table style="font-size:16px"><thead><tr><th></th><th>Result</th><th>Filename</th><th>Detected / Issues</th><th>Where</th><th>Time</th></tr></thead><tbody>';
