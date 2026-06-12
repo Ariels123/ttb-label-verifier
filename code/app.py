@@ -485,6 +485,9 @@ input[type=text]:focus{outline:none;border-color:var(--blue)}
 .imgtool:hover{background:var(--bg)}
 .imgtool.active{background:var(--blue);color:#fff;border-color:var(--blue)}
 .crophint{font-size:13px;color:var(--mut)}
+.rotwrap{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:var(--ink)}
+.rotwrap input[type=range]{width:120px;cursor:pointer}
+.rotwrap #rotVal{font-variant-numeric:tabular-nums;color:var(--mut);font-weight:400;min-width:34px}
 .cropsel{position:absolute;border:2px dashed var(--blue);background:rgba(26,79,138,.18);pointer-events:none;display:none;z-index:5}
 .go{margin-top:24px;width:100%;background:var(--blue);color:#fff;border:none;border-radius:14px;padding:20px;font-size:22px;font-weight:800;cursor:pointer;transition:transform 0.1s}
 .go:active{transform:scale(0.98)}
@@ -596,8 +599,9 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
    </div>
    <input type="file" id="file" accept="image/*" style="display:none">
    <div class="imgtools" id="imgtools" title="Adjust the image before checking — helpful for angled or curved-bottle photos">
-     <button type="button" class="imgtool" onclick="rotateImg(-90)">&#8634; Rotate left</button>
-     <button type="button" class="imgtool" onclick="rotateImg(90)">Rotate right &#8635;</button>
+     <button type="button" class="imgtool" onclick="rotateImg(-90)" title="Rotate 90° left (sideways photo)">&#8634; 90&deg;</button>
+     <button type="button" class="imgtool" onclick="rotateImg(90)" title="Rotate 90° right (sideways photo)">90&deg; &#8635;</button>
+     <label class="rotwrap" title="Fine rotation — straighten a tilted label so the text is level">Straighten <input type="range" id="rotSlider" min="-45" max="45" value="0" step="1" oninput="rotLive(this.value)" onchange="rotBake(this.value)"><span id="rotVal">0&deg;</span></label>
      <button type="button" class="imgtool" id="cropBtn" onclick="toggleCrop()">&#9986;&#65039; Crop</button>
      <button type="button" class="imgtool" id="cropApply" onclick="applyCrop()" style="display:none">Apply crop</button>
      <span class="crophint" id="cropHint"></span>
@@ -742,12 +746,22 @@ function showImgTools(on){ const t=$('imgtools'); if(t)t.classList.toggle('on',!
 function fileToImg(file){ return new Promise((res,rej)=>{const im=new Image();im.onload=()=>res(im);im.onerror=()=>rej(new Error('img'));im.src=URL.createObjectURL(file);}); }
 function canvasToFile(c,name){ return new Promise(res=>c.toBlob(b=>res(new File([b],name||'edited.png',{type:(b&&b.type)||'image/png'})),'image/png',0.95)); }
 async function rotateImg(deg){
-  if(!singleFile||cropMode) return;
-  const im=await fileToImg(singleFile), swap=Math.abs(deg)%180===90;
-  const c=document.createElement('canvas'); c.width=swap?im.naturalHeight:im.naturalWidth; c.height=swap?im.naturalWidth:im.naturalHeight;
-  const x=c.getContext('2d'); x.translate(c.width/2,c.height/2); x.rotate(deg*Math.PI/180); x.drawImage(im,-im.naturalWidth/2,-im.naturalHeight/2);
+  if(!singleFile||cropMode||!deg) return;
+  const im=await fileToImg(singleFile), rad=deg*Math.PI/180, w=im.naturalWidth, h=im.naturalHeight;
+  const aw=Math.abs(w*Math.cos(rad))+Math.abs(h*Math.sin(rad)), ah=Math.abs(w*Math.sin(rad))+Math.abs(h*Math.cos(rad));
+  const c=document.createElement('canvas'); c.width=Math.round(aw); c.height=Math.round(ah);
+  const x=c.getContext('2d'); x.fillStyle='#fff'; x.fillRect(0,0,c.width,c.height);   // white bg so rotated corners aren't black to the OCR
+  x.translate(c.width/2,c.height/2); x.rotate(rad); x.drawImage(im,-w/2,-h/2);
   URL.revokeObjectURL(im.src);
   singleFile=await canvasToFile(c,singleFile.name); $('result').innerHTML=''; preview();
+}
+// "Straighten" slider: live-rotate the preview (CSS) while dragging; bake into the image on
+// release, then reset the slider to 0 — each gesture nudges the current image by that angle.
+function rotLive(v){ const im=_imgEl(); if(im){im.style.transformOrigin='center';im.style.transform='rotate('+v+'deg)';} $('rotVal').textContent=(v>0?'+':'')+v+'°'; }
+async function rotBake(v){
+  const sl=$('rotSlider'), ang=parseFloat(v)||0, im=_imgEl();
+  if(im)im.style.transform=''; if(sl)sl.value=0; $('rotVal').textContent='0°';
+  if(singleFile&&ang) await rotateImg(ang);
 }
 function toggleCrop(){
   cropMode=!cropMode;
