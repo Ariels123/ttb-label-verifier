@@ -41,6 +41,22 @@ def test_warning_missing_fails():
     assert v.check_warning("Just a nice bourbon label")[0] == v.FAIL
 
 
+def test_warning_meaning_inversions_fail():
+    # A forgiving fuzzy gate used to PASS these one-word meaning-inversions as "exact statutory
+    # wording" — the contiguous-substring check must FAIL all of them.
+    assert v.check_warning(WARN.replace("impairs your ability", "enhances your ability"))[0] == v.FAIL
+    assert v.check_warning(WARN.replace("women should not", "men should not"))[0] == v.FAIL
+    assert v.check_warning(WARN.replace("risk of birth defects", "absence of birth defects"))[0] == v.FAIL
+    assert v.check_warning(WARN.replace("may cause health problems", "may prevent health problems"))[0] == v.FAIL
+
+
+def test_warning_line_wrapped_body_still_passes():
+    # Real OCR wraps the body across lines + drops some punctuation; a genuinely correct warning
+    # must still PASS via the slip-tolerant substring test (no false FAIL on clean labels).
+    wrapped = WARN.replace(". (2)", ".\n(2)").replace("drive a car or", "drive a car or\n")
+    assert v.check_warning(wrapped)[0] == v.PASS
+
+
 def test_abv_percent_passes():
     assert v.check_abv("45", "45% Alc./Vol.")[0] == v.PASS
 

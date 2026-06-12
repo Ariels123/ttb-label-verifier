@@ -250,19 +250,20 @@ def check_warning(ocr: str) -> tuple[str, str]:
     """Strict Government Warning check — the one element the brief says must be exact.
 
     This is intentionally the LEAST forgiving check in the file (Jenny's rule). It clears
-    three independent hurdles, each of which can fail the label on its own:
+    two hurdles, each of which can fail the label on its own:
 
       1. ALL-CAPS HEADING. The literal "GOVERNMENT WARNING:" must appear in upper case. We
          first collapse whitespace so an OCR line-wrap ("GOVERNMENT\\nWARNING:") still counts,
          then test case-sensitively. If the words are present but not all-caps (a title-case
          "Government Warning:"), that is a specific, reportable defect — not "missing".
-      2. EXACT STATUTORY WORDING. A fuzzy `_partial` ratio against the canonical 27 CFR 16.21
-         text must clear a HIGH bar (0.95). High rather than 1.0 only to tolerate OCR noise —
-         not to forgive real edits.
-      3. CRITICAL TERMS PRESENT. A belt-and-suspenders keyword sweep. Fuzzy matching could in
-         principle accept text whose MEANING was altered (e.g. a dropped clause) if enough
-         surrounding words match; requiring each load-bearing phrase to be literally present
-         ("surgeon general", "birth defects", "operate machinery", …) blocks that.
+      2. EXACT STATUTORY WORDING — a CONTIGUOUS-SUBSTRING test, NOT a fuzzy ratio. The canonical
+         27 CFR 16.21 text must appear contiguously inside the OCR after `_loose` normalization
+         (lowercase, punctuation/whitespace collapsed, OCR slips 0↔O/1↔I↔l folded). This is what
+         rejects MEANING-INVERTED warnings — "ENHANCES your ability to drive a car", "MEN should
+         not drink", "ABSENCE of birth defects" — which a forgiving fuzzy ratio wrongly accepts
+         (a one-word inversion still scores >0.95). Anything short of an exact (slip-tolerant)
+         match is reported as altered/defective, never PASS; on the real-OCR path verify() softens
+         a low-confidence near-miss to "verify by eye".
 
     Why so strict: the health warning is statutorily mandated word-for-word, so "close enough"
     is the wrong default here even though it is the right default for a brand name.
@@ -282,23 +283,26 @@ def check_warning(ocr: str) -> tuple[str, str]:
             return FAIL, "Present, but “GOVERNMENT WARNING:” is not in ALL-CAPS"
         return FAIL, "Government Warning header is missing"
 
-    # Hurdle 2 — exact statutory wording, fuzzy only enough to survive OCR noise (0.95 bar).
-    body_match = _partial(_loose(GOV_WARNING), _loose(raw))
-    if body_match < 0.95:
-        return FAIL, f"Statutory wording is incorrect or incomplete ({int(body_match * 100)}%)"
+    # Hurdle 2 — EXACT wording via CONTIGUOUS SUBSTRING (the fix for meaning-inverted warnings).
+    # _loose() lowercases, strips punctuation, collapses whitespace (so OCR line-wraps are fine)
+    # and folds OCR slips 0↔O/1↔I↔l. If the canonical warning appears CONTIGUOUSLY in the
+    # normalized OCR, the wording is exact-enough; otherwise it's altered/incomplete/too garbled
+    # to trust. A fuzzy ratio was used here before and wrongly PASSed one-word inversions.
+    loose_raw = _loose(raw)
+    if _loose(GOV_WARNING) in loose_raw:
+        return PASS, "Present, exact statutory wording, ALL-CAPS heading"
 
-    # Hurdle 3 — every load-bearing phrase must literally appear, so a high fuzzy score can't
-    # paper over altered meaning. Collapse whitespace first: OCR wraps the warning across
-    # lines, so "operate machinery" can read as "operate\nmachinery" — without this flattening
-    # a perfectly valid label would fail the substring test.
-    flat = re.sub(r"\s+", " ", raw).lower()
-    criticals = ["SURGEON GENERAL", "SHOULD NOT DRINK", "PREGNANCY", "BIRTH DEFECTS",
-                 "OPERATE MACHINERY", "DRIVE A CAR", "HEALTH PROBLEMS"]
-    missing = [word for word in criticals if word.lower() not in flat]
+    # Present but NOT an exact match — surface which load-bearing phrases are missing/altered.
+    # This both explains the failure and pinpoints meaning inversions (impairs↔enhances,
+    # women↔men, risk-of↔absence-of). Still a FAIL; verify() may soften it to "verify by eye"
+    # on a low-confidence real read.
+    criticals = ["women should not drink", "during pregnancy", "risk of birth defects",
+                 "impairs your ability", "operate machinery", "drive a car", "health problems",
+                 "surgeon general"]
+    missing = [c for c in criticals if _loose(c) not in loose_raw]
     if missing:
-        return FAIL, f"Missing critical statutory terms: {', '.join(missing)}"
-
-    return PASS, "Present, exact statutory wording, ALL-CAPS heading"
+        return FAIL, f"Government Warning wording is altered or incomplete (missing/changed: {', '.join(missing)})"
+    return FAIL, "Government Warning wording does not exactly match 27 CFR 16.21 — verify by eye"
 
 
 # Net-contents unit handling.
