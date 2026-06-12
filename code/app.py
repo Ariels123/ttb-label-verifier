@@ -775,22 +775,24 @@ function _imgEl(){ return $('drop').querySelector('img'); }
 function _cropDown(e){ if(!cropMode||!_imgEl())return; e.preventDefault(); _cs={x:e.clientX,y:e.clientY}; }
 function _cropMove(e){
   if(!cropMode||!_cs)return;
-  const drop=$('drop'),dr=drop.getBoundingClientRect(); let s=drop.querySelector('.cropsel');
-  if(!s){s=document.createElement('div');s.className='cropsel';drop.appendChild(s);}
+  const drop=$('drop'),dr=drop.getBoundingClientRect(),im=_imgEl(); if(!im)return; const ir=im.getBoundingClientRect();
+  let s=drop.querySelector('.cropsel'); if(!s){s=document.createElement('div');s.className='cropsel';drop.appendChild(s);}
   const x0=Math.min(_cs.x,e.clientX),y0=Math.min(_cs.y,e.clientY),x1=Math.max(_cs.x,e.clientX),y1=Math.max(_cs.y,e.clientY);
   s.style.display='block';s.style.left=(x0-dr.left)+'px';s.style.top=(y0-dr.top)+'px';s.style.width=(x1-x0)+'px';s.style.height=(y1-y0)+'px';
-  _cropRect={x0,y0,x1,y1};
+  // Store the selection as FRACTIONS of the image (clamped 0..1) — robust to any scroll/layout
+  // shift between dragging and clicking Apply (which broke crop after a straighten).
+  const cl=v=>Math.max(0,Math.min(1,v));
+  _cropRect={fx0:cl((x0-ir.left)/ir.width),fy0:cl((y0-ir.top)/ir.height),fx1:cl((x1-ir.left)/ir.width),fy1:cl((y1-ir.top)/ir.height)};
 }
 function _cropUp(){ _cs=null; }
 async function applyCrop(){
   if(!cropMode||!_cropRect||!singleFile)return;
-  const im=_imgEl(); if(!im)return; const ir=im.getBoundingClientRect();
-  const dx0=Math.max(_cropRect.x0,ir.left),dy0=Math.max(_cropRect.y0,ir.top),dx1=Math.min(_cropRect.x1,ir.right),dy1=Math.min(_cropRect.y1,ir.bottom);
-  if(dx1-dx0<8||dy1-dy0<8){$('cropHint').textContent='Selection too small — drag a larger box over the label.';return;}
-  const src=await fileToImg(singleFile), sx=src.naturalWidth/ir.width, sy=src.naturalHeight/ir.height;
-  const cw=(dx1-dx0)*sx, ch=(dy1-dy0)*sy;
+  const r=_cropRect, fw=r.fx1-r.fx0, fh=r.fy1-r.fy0;
+  if(fw<0.03||fh<0.03){$('cropHint').textContent='Selection too small — drag a larger box over the label.';return;}
+  const src=await fileToImg(singleFile);
+  const cw=fw*src.naturalWidth, ch=fh*src.naturalHeight;
   const c=document.createElement('canvas'); c.width=Math.round(cw); c.height=Math.round(ch);
-  c.getContext('2d').drawImage(src,(dx0-ir.left)*sx,(dy0-ir.top)*sy,cw,ch,0,0,c.width,c.height);
+  c.getContext('2d').drawImage(src, r.fx0*src.naturalWidth, r.fy0*src.naturalHeight, cw, ch, 0,0,c.width,c.height);
   URL.revokeObjectURL(src.src);
   singleFile=await canvasToFile(c,singleFile.name);
   toggleCrop(); $('result').innerHTML=''; preview();

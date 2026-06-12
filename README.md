@@ -5,8 +5,10 @@ against its **application data** — brand, class/type, alcohol content, net con
 bottler/producer, country of origin, and the mandatory **Government Warning** — and returns a
 big, obvious **PASS / FAIL** per field in well under five seconds. It also **reads the label and
 shows what it found, with a per-field confidence level**, and has a **batch mode** for hundreds
-of labels at once. All OCR runs **locally** — no cloud calls — so it works behind a locked-down
-federal firewall.
+of labels at once. All OCR runs **locally** — in the user's browser or on the server — so the
+**label image never goes to a cloud service**, which matters behind a locked-down federal firewall.
+(The browser engine downloads its model files from a CDN once; for a strictly air-gapped install
+those would be self-hosted — see [limitations](#known-limitations--trade-offs).)
 
 **Live demo:** http://178.156.185.31:8080 · **Run locally:** [below](#running).
 
@@ -140,11 +142,32 @@ description), strongest first:
 3. **Server** — uploads the image and runs the light server-side Tesseract; no in-browser
    engine at all.
 
+**Curved-label recovery (tiled OCR).** When the whole-image read comes back poor — usually a label
+**wrapped around a bottle**, where the text baselines bend across the frame — the browser engine
+automatically re-OCRs the image in narrow **vertical strips** (over a small horizontal span the
+curve is nearly flat) and unions the fragments. This recovers fields a single pass misses (e.g. the
+ABV and net contents off an angled back-label). It only runs when the fast whole-image pass reads
+poorly, so easy labels stay fast.
+
 Browser OCR is **advisory**: client-supplied text is untrusted, so the server remains the source of
 truth for any authoritative decision (and the `/verify_text` inputs are hard-capped + sanitized
 against abuse). The server's own OCR is deliberately kept lightweight (Tesseract, no heavy models)
 because the heavy lifting now happens on the client. *(Default engine is configurable; for a strict
 federal posture, default to Tesseract or Server so foreign-developed software is opt-in.)*
+
+## Image tools (fix a hard photo before OCR)
+
+When a label is loaded, a small tool bar appears under the preview so the agent can correct a
+difficult photo **before** checking it — all in the browser, nothing uploaded:
+
+- **Rotate 90°** (left / right) — for a sideways or upside-down shot.
+- **Straighten** — a fine-rotation slider (±45°) to level a tilted label so the text baselines are
+  horizontal (which is what the OCR line-detector needs).
+- **Crop** — drag a box over the part to keep, then **Apply** — to isolate the flat, readable region
+  of a curved-bottle photo (the edges distort). The selection is stored as fractions of the image,
+  so it stays accurate regardless of scroll or zoom.
+
+Each edit is baked into the image (via canvas) and becomes what gets OCR'd.
 
 ## Batch mode
 
@@ -210,13 +233,13 @@ The deployed instance runs this image with a memory cap and a volume-backed temp
 
 ## Known limitations / trade-offs
 
-- **Physical distortion still reads partially.** The browser now runs the **PP-OCRv5 deep model**
-  by default (the most accurate engine in the system), so ordinary ornate/low-contrast labels read
-  well. What stays genuinely hard is *physical* distortion — text wrapped around a **curved bottle**,
-  shot at a steep **angle**, or **occluded** (a finger over the label) — which no flat single-pass
-  OCR reads without dewarping. On those the tool stays silent on extraction and flags "verify by
-  eye" rather than guessing. Next steps: perspective/cylinder dewarping, or height-based brand
-  detection.
+- **Severe physical distortion still needs help.** The browser runs the **PP-OCRv5 deep model** by
+  default and **auto-escalates to tiled-strip OCR** on curved labels, so most angled/curved photos
+  now read. For the hardest cases (text wrapped tightly around a bottle, a steep angle, or a finger
+  **occluding** the label) the agent can **straighten / crop** the photo first (image tools above).
+  If it's still unreadable, the tool says so honestly — a very low OCR confidence triggers a
+  **"couldn't read — submit the flat label image"** message rather than guessing or surfacing
+  garbled text. The remaining upgrade is true perspective/cylinder **dewarping**.
 - **"Bold" heading isn't verified** — font weight isn't reliably recoverable from OCR text, so only
   wording + caps are checked.
 - **Forgiving identity matching** can over-match very short, similar strings (intentional for
