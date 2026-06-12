@@ -525,9 +525,11 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
 .engopt input{width:20px;height:20px;cursor:pointer;margin-top:2px;grid-row:span 2}
 .engname{font-weight:700;font-size:15px;color:var(--ink)}
 .engdesc{font-size:14px;color:var(--mut);line-height:1.4}
-.engflag{display:inline-block;margin-left:6px;font-size:12px;font-weight:700;color:#a3201a;background:#fdecea;border:1px solid #f0b3ad;border-radius:6px;padding:1px 7px;vertical-align:1px}
+.engflag{display:inline-block;margin-left:6px;font-size:12px;font-weight:700;color:#a3201a;background:#fdecea;border:1px solid #f0b3ad;border-radius:6px;padding:1px 7px;vertical-align:1px;position:relative;cursor:help;text-decoration:underline dotted}
 .engok{display:inline-block;margin-left:6px;font-size:12px;font-weight:700;color:var(--green);background:var(--greenbg);border-radius:6px;padding:1px 7px;vertical-align:1px}
-.engwarn{display:none;margin-top:10px;background:#fdecea;color:#7a1a13;border:2px solid #e0897f;border-radius:12px;padding:13px 16px;font-size:14.5px;font-weight:500;line-height:1.5}
+.engtip{display:none;position:absolute;top:160%;left:0;z-index:60;width:330px;max-width:78vw;background:#2b1410;color:#fff;border:1px solid #e0897f;border-radius:10px;padding:11px 13px;font-size:13px;font-weight:400;line-height:1.5;text-decoration:none;box-shadow:0 8px 26px rgba(0,0,0,.28)}
+.engtip:before{content:"";position:absolute;bottom:100%;left:16px;border:7px solid transparent;border-bottom-color:#2b1410}
+.engflag:hover .engtip,.engflag:focus .engtip,.engflag:focus-within .engtip{display:block}
 .prog{margin-top:14px;height:10px;background:#e7edf5;border-radius:6px;overflow:hidden}
 .progbar{height:100%;width:0;background:var(--blue);transition:width .25s}
 @keyframes indet{0%{transform:translateX(-110%)}100%{transform:translateX(260%)}}
@@ -597,7 +599,7 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
    <div class="enginepick" role="radiogroup" aria-label="OCR engine">
      <div class="englabel">&#9889; OCR engine <em style="font-weight:400;color:var(--mut)">— runs on your device unless noted; the image never leaves your computer for the browser engines</em></div>
      <label class="engopt"><input type="radio" name="engine" value="paddle" checked onchange="engineChanged('')">
-       <span class="engname">PaddleOCR (PP-OCRv5)<span class="engflag">&#9888; Baidu &middot; China</span></span>
+       <span class="engname">PaddleOCR (PP-OCRv5)<span class="engflag" tabindex="0" role="note" aria-label="Foreign software warning"><span aria-hidden="true">&#9888; Baidu &middot; China</span><span class="engtip">&#9888;&#65039; <b>PaddleOCR is developed by Baidu, a company based in China.</b> Selecting it runs Baidu&rsquo;s OCR models inside your browser. Your label image stays on your device, but the OCR software itself originates from China &mdash; review your organization&rsquo;s policy on foreign-developed software before using this option in a government environment.</span></span></span>
        <span class="engdesc">Most accurate. Deep-learning OCR running on your device&rsquo;s GPU; the image stays on your computer. Falls back to the secure server if it can&rsquo;t read an image.</span></label>
      <label class="engopt"><input type="radio" name="engine" value="tesseract" onchange="engineChanged('')">
        <span class="engname">Tesseract<span class="engok">open-source</span></span>
@@ -605,7 +607,6 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
      <label class="engopt"><input type="radio" name="engine" value="server" onchange="engineChanged('')">
        <span class="engname">Secure server</span>
        <span class="engdesc">Uploads the image and runs OCR on the TTB server &mdash; no in-browser engine. Use if your policy disallows in-browser AI models.</span></label>
-     <div id="engWarn" class="engwarn"></div>
    </div>
    </details>
   </div>
@@ -646,7 +647,7 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
  <div class="enginepick" role="radiogroup" aria-label="OCR engine for batch">
    <div class="englabel">&#9889; OCR engine <em style="font-weight:400;color:var(--mut)">— used for every label in the batch</em></div>
    <label class="engopt"><input type="radio" name="b_engine" value="paddle" checked onchange="engineChanged('b_')">
-     <span class="engname">PaddleOCR (PP-OCRv5)<span class="engflag">&#9888; Baidu &middot; China</span></span>
+     <span class="engname">PaddleOCR (PP-OCRv5)<span class="engflag" tabindex="0" role="note" aria-label="Foreign software warning"><span aria-hidden="true">&#9888; Baidu &middot; China</span><span class="engtip">&#9888;&#65039; <b>PaddleOCR is developed by Baidu, a company based in China.</b> Selecting it runs Baidu&rsquo;s OCR models inside your browser. Your label image stays on your device, but the OCR software itself originates from China &mdash; review your organization&rsquo;s policy on foreign-developed software before using this option in a government environment.</span></span></span>
      <span class="engdesc">Most accurate. Deep-learning OCR on your device&rsquo;s GPU; images stay on your computer. Ideal for large batches.</span></label>
    <label class="engopt"><input type="radio" name="b_engine" value="tesseract" onchange="engineChanged('b_')">
      <span class="engname">Tesseract<span class="engok">open-source</span></span>
@@ -654,7 +655,6 @@ input::placeholder{font-style:italic;color:#aab2bd;opacity:1}
    <label class="engopt"><input type="radio" name="b_engine" value="server" onchange="engineChanged('b_')">
      <span class="engname">Secure server</span>
      <span class="engdesc">Uploads each image and runs OCR on the TTB server &mdash; no in-browser engine.</span></label>
-   <div id="b_engWarn" class="engwarn"></div>
  </div>
  </details>
  <button class="go" id="bGoBtn" onclick="verifyBatch()">Start Batch Verification</button>
